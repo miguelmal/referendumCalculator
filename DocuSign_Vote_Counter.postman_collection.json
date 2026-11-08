@@ -1,0 +1,218 @@
+{
+  "info": {
+    "name": "DocuSign Vote Counter API",
+    "description": "A collection of the DocuSign API calls used by the Vote Counter application.",
+    "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
+  },
+  "item": [
+    {
+      "name": "1. Get Account Info",
+      "request": {
+        "method": "GET",
+        "header": [],
+        "url": {
+          "raw": "https://{{authServer}}/oauth/userinfo",
+          "protocol": "https",
+          "host": [
+            "{{authServer}}"
+          ],
+          "path": [
+            "oauth",
+            "userinfo"
+          ]
+        }
+      },
+      "response": []
+    },
+    {
+      "name": "2. List Envelopes",
+      "request": {
+        "method": "GET",
+        "header": [],
+        "url": {
+          "raw": "{{baseUrl}}/accounts/{{accountId}}/envelopes?from_date={{fromDate}}&status=any",
+          "host": [
+            "{{baseUrl}}"
+          ],
+          "path": [
+            "accounts",
+            "{{accountId}}",
+            "envelopes"
+          ],
+          "query": [
+            {
+              "key": "from_date",
+              "value": "{{fromDate}}"
+            },
+            {
+              "key": "status",
+              "value": "any"
+            }
+          ]
+        }
+      },
+      "response": []
+    },
+    {
+      "name": "3. Get Envelope Recipients & Tabs",
+      "request": {
+        "method": "GET",
+        "header": [],
+        "url": {
+          "raw": "{{baseUrl}}/accounts/{{accountId}}/envelopes/{{envelopeId}}/recipients?include_tabs=true",
+          "host": [
+            "{{baseUrl}}"
+          ],
+          "path": [
+            "accounts",
+            "{{accountId}}",
+            "envelopes",
+            "{{envelopeId}}",
+            "recipients"
+          ],
+          "query": [
+            {
+              "key": "include_tabs",
+              "value": "true"
+            }
+          ]
+        }
+      },
+      "response": []
+    },
+    {
+      "name": "4. Get docGenFormFields",
+      "request": {
+        "method": "GET",
+        "header": [],
+        "url": {
+          "raw": "{{baseUrl}}/accounts/{{accountId}}/envelopes/{{envelopeId}}/docGenFormFields",
+          "host": [
+            "{{baseUrl}}"
+          ],
+          "path": [
+            "accounts",
+            "{{accountId}}",
+            "envelopes",
+            "{{envelopeId}}",
+            "docGenFormFields"
+          ]
+        },
+        "description": "Only works on Active envelopes (Created, Sent, Delivered, Correct). Will return 400 ENVELOPE_INVALID_STATUS for Completed or Voided envelopes."
+      },
+      "response": []
+    },
+    {
+      "name": "5. Get Envelope Documents",
+      "request": {
+        "method": "GET",
+        "header": [],
+        "url": {
+          "raw": "{{baseUrl}}/accounts/{{accountId}}/envelopes/{{envelopeId}}/documents",
+          "host": [
+            "{{baseUrl}}"
+          ],
+          "path": [
+            "accounts",
+            "{{accountId}}",
+            "envelopes",
+            "{{envelopeId}}",
+            "documents"
+          ]
+        }
+      },
+      "response": []
+    },
+    {
+      "name": "6. Void Envelope",
+      "request": {
+        "method": "PUT",
+        "header": [
+          {
+            "key": "Content-Type",
+            "value": "application/json"
+          }
+        ],
+        "body": {
+          "mode": "raw",
+          "raw": "{\n  \"status\": \"voided\",\n  \"voidedReason\": \"Administratively voided via API\"\n}"
+        },
+        "url": {
+          "raw": "{{baseUrl}}/accounts/{{accountId}}/envelopes/{{envelopeId}}",
+          "host": [
+            "{{baseUrl}}"
+          ],
+          "path": [
+            "accounts",
+            "{{accountId}}",
+            "envelopes",
+            "{{envelopeId}}"
+          ]
+        }
+      },
+      "response": []
+    }
+  ],
+  "auth": {
+    "type": "bearer",
+    "bearer": [
+      {
+        "key": "token",
+        "value": "{{accessToken}}",
+        "type": "string"
+      }
+    ]
+  },
+  "event": [
+    {
+      "listen": "prerequest",
+      "script": {
+        "type": "text/javascript",
+        "exec": [
+          ""
+        ]
+      }
+    },
+    {
+      "listen": "test",
+      "script": {
+        "type": "text/javascript",
+        "exec": [
+          ""
+        ]
+      }
+    }
+  ],
+  "variable": [
+    {
+      "key": "authServer",
+      "value": "account-d.docusign.com",
+      "type": "string"
+    },
+    {
+      "key": "baseUrl",
+      "value": "https://demo.docusign.net/restapi/v2.1",
+      "type": "string"
+    },
+    {
+      "key": "accountId",
+      "value": "REPLACE_WITH_ACCOUNT_ID",
+      "type": "string"
+    },
+    {
+      "key": "accessToken",
+      "value": "REPLACE_WITH_JWT_ACCESS_TOKEN",
+      "type": "string"
+    },
+    {
+      "key": "envelopeId",
+      "value": "REPLACE_WITH_ENVELOPE_ID",
+      "type": "string"
+    },
+    {
+      "key": "fromDate",
+      "value": "2026-01-01",
+      "type": "string"
+    }
+  ]
+}

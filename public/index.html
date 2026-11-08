@@ -1,0 +1,115 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Dashboard de Votos – DocuSign</title>
+  <meta name="description" content="Dashboard para visualizar y gestionar votos de acuerdos DocuSign en tiempo real.">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+
+  <!-- Header -->
+  <header class="app-header">
+    <div class="header-left">
+      <img src="logo.png" alt="PRCDA Logo" class="header-logo" style="height: 48px; margin-right: 12px; object-fit: contain;">
+      <div>
+        <h1 class="header-title">Dashboard de Votaciones</h1>
+        <span class="header-subtitle" id="account-name-badge">Conectando…</span>
+      </div>
+    </div>
+    <div class="header-right">
+      <button class="btn" id="btn-admin" title="Configuraciones">
+        <span class="btn-icon">⚙️</span> Admin
+      </button>
+      <button class="btn btn-refresh" id="btn-refresh" title="Sincronizar con DocuSign">
+        <span class="btn-icon">↻</span> Actualizar
+      </button>
+    </div>
+  </header>
+
+  <div class="global-filter-bar" style="background: var(--surface); padding: 12px 24px; border-bottom: 1px solid var(--border); display: flex; gap: 15px; align-items: center; justify-content: flex-start;">
+    <input type="text" id="search-filter" class="search-input" placeholder="Buscar por asunto o nombre…" aria-label="Buscar acuerdos" style="min-width: 300px;">
+    
+    <label style="display:flex; align-items:center; gap:8px; font-size:0.95rem; cursor:pointer; user-select:none; margin-right: auto;">
+      <input type="checkbox" id="show-completed-toggle">
+      Mostrar Completados/Cerrados
+    </label>
+
+    <select id="sort-select" class="search-input" aria-label="Ordenar por" style="cursor: pointer; min-width: 180px;">
+      <option value="status">Ordenar por Estado</option>
+      <option value="newest">Más recientes primero</option>
+      <option value="oldest">Más antiguos primero</option>
+    </select>
+  </div>
+
+
+  <!-- Tab Navigation -->
+  <nav class="tab-nav" id="tab-nav" role="tablist">
+  </nav>
+
+  <main class="container">
+
+
+
+    <!-- Agreements Panel -->
+    <section class="agreements-section">
+      <div class="section-header">
+        <h2 class="section-title" id="section-title">Acuerdos</h2>
+        </div>
+
+      <div class="agreements-list" id="agreements-container" role="list">
+        <div class="loading-state">
+          <div class="spinner"></div>
+          Consultando DocuSign…
+        </div>
+      </div>
+    </section>
+
+  </main>
+
+  <!-- Toast Notification -->
+  <div class="toast" id="toast" role="alert" aria-live="polite"></div>
+
+  <!-- Admin Modal -->
+  <dialog id="admin-modal" class="admin-modal">
+    <div class="modal-content">
+      <header class="modal-header">
+        <h2>Configuración</h2>
+        <button id="btn-close-admin" class="modal-close-icon" aria-label="Cerrar">&times;</button>
+      </header>
+      
+      <div class="modal-body">
+        <!-- Template Settings Form -->
+        <section class="admin-section">
+          <h3>Configuración de Plantillas</h3>
+          <p style="font-size: 0.9rem; color: var(--text-muted); margin-bottom: 0.5rem;">Plantillas existentes (clic para editar):</p>
+          <div id="existing-templates" style="margin-bottom: 1.5rem; font-size: 0.9rem;">
+            <!-- Badges injected here -->
+          </div>
+
+          <form id="template-config-form" style="display:none;">
+            <div class="form-group">
+              <label for="templateName">Nombre de la Plantilla (ej. Board Referendum)</label>
+              <input type="text" id="templateName" name="templateName" class="search-input" required>
+            </div>
+            <div class="form-group">
+              <label for="voteOptions">Opciones de Voto (separadas por coma)</label>
+              <input type="text" id="voteOptions" name="voteOptions" class="search-input" placeholder="A Favor, No a Favor, Abstenido" required>
+            </div>
+            <div class="form-group">
+              <label for="contentField">Campo de Contenido (ej. Resumen)</label>
+              <input type="text" id="contentField" name="contentField" class="search-input" required>
+            </div>
+            <button type="submit" class="btn btn-refresh">Guardar Plantilla</button>
+          </form>
+        </section>
+      </div>
+    </div>
+  </dialog>
+
+  <script src="client.js"></script>
+</body>
+</html>
