@@ -70,4 +70,8 @@ async function boot() {
   });
 }
 
-boot();
+if (!process.env.VERCEL && require.main === module) {
+  boot();
+}
+
+module.exports = app;

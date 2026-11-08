@@ -30,9 +30,22 @@ router.get('/votes', async (req, res) => {
 router.post('/refresh', async (req, res) => {
   try {
     await refreshCache();
+    await scheduler._tick();
     res.json({ success: true, message: 'Cache refreshed from DocuSign' });
   } catch (err) {
     console.error('POST /api/refresh error:', err.message);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+/** GET /cron — Vercel Cron endpoint to sync cache & process expired envelopes */
+router.get('/cron', async (req, res) => {
+  try {
+    await refreshCache();
+    await scheduler._tick();
+    res.json({ success: true, message: 'Cron sync and scheduler tick completed' });
+  } catch (err) {
+    console.error('GET /api/cron error:', err.message);
     res.status(500).json({ error: err.message });
   }
 });

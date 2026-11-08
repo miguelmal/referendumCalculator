@@ -1,35 +1,205 @@
 /**
  * databaseService.js
- * Redis-backed envelope cache (voided DocuSign envelopes lose form data).
+ * Vercel KV / Upstash Redis / Redis-backed envelope & Connect event store.
+ *
+ * Connection priority:
+ *   1. Upstash / Vercel KV HTTP REST (`@upstash/redis`):
+ *      Uses UPSTASH_REDIS_REST_URL + UPSTASH_REDIS_REST_TOKEN
+ *      or   KV_REST_API_URL + KV_REST_API_TOKEN.
+ *      (Recommended on Vercel Serverless — stateless HTTP, no TCP socket limits.)
+ *   2. Redis TCP / TLS (`redis`):
+ *      Uses KV_URL or REDIS_URL (or redis://localhost:6379 for local dev).
+ *   3. In-memory fallback (when running on Vercel before a KV store is linked):
+ *      Prevents webhook/API crashes during initial testing.
  *
  * Keys:
- *   envelope:{envelopeId}  → JSON of normalized envelope
- *   active_presentaciones  → Set of active Presentacion de Casos ids
- *   document_field:{id}    → Hash of extra per-envelope fields
+ *   envelope:{envelopeId}        → JSON of normalized envelope
+ *   active_presentaciones        → Set of active Presentacion de Casos ids
+ *   document_field:{id}          → Hash of extra per-envelope fields
+ *   connect_event:{eventId}      → JSON of stored Connect webhook event
+ *   connect_events               → List (newest-first) of eventIds
+ *   connect_events:{envelopeId}  → List of eventIds for one envelope
  */
 
 const redis = require('redis');
+const { Redis: UpstashRedis } = require('@upstash/redis');
+
+function parseJson(raw) {
+  if (raw === null || raw === undefined) return null;
+  if (typeof raw === 'object') return raw;
+  try {
+    return JSON.parse(raw);
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * In-memory adapter with the same normalized interface as the Redis adapters.
+ * Used only as a safety fallback on Vercel if no KV/Redis env vars are set.
+ */
+class MemoryAdapter {
+  constructor() {
+    this.kv = new Map();
+    this.sets = new Map();
+    this.hashes = new Map();
+    this.lists = new Map();
+  }
+
+  async get(key) {
+    return this.kv.has(key) ? this.kv.get(key) : null;
+  }
+
+  async set(key, value) {
+    this.kv.set(key, value);
+  }
+
+  async keys(pattern) {
+    const prefix = pattern.replace(/\*$/, '');
+    return Array.from(this.kv.keys()).filter(k => k.startsWith(prefix));
+  }
+
+  async sAdd(key, member) {
+    if (!this.sets.has(key)) this.sets.set(key, new Set());
+    this.sets.get(key).add(member);
+  }
+
+  async sRem(key, member) {
+    if (this.sets.has(key)) this.sets.get(key).delete(member);
+  }
+
+  async sMembers(key) {
+    return this.sets.has(key) ? Array.from(this.sets.get(key)) : [];
+  }
+
+  async hSet(key, field, value) {
+    if (!this.hashes.has(key)) this.hashes.set(key, {});
+    this.hashes.get(key)[field] = String(value);
+  }
+
+  async hGetAll(key) {
+    return this.hashes.has(key) ? { ...this.hashes.get(key) } : {};
+  }
+
+  async lPush(key, value) {
+    if (!this.lists.has(key)) this.lists.set(key, []);
+    this.lists.get(key).unshift(value);
+  }
+
+  async lRange(key, start, stop) {
+    const list = this.lists.get(key) || [];
+    return list.slice(start, stop + 1);
+  }
+}
+
+/**
+ * Adapter wrapping `@upstash/redis` (Vercel KV / Upstash HTTP REST API)
+ * to expose the unified method names used by DatabaseService.
+ */
+class UpstashAdapter {
+  constructor(url, token) {
+    this.client = new UpstashRedis({ url, token });
+  }
+
+  async get(key) {
+    return await this.client.get(key);
+  }
+
+  async set(key, value) {
+    await this.client.set(key, value);
+  }
+
+  async keys(pattern) {
+    return (await this.client.keys(pattern)) || [];
+  }
+
+  async sAdd(key, member) {
+    await this.client.sadd(key, member);
+  }
+
+  async sRem(key, member) {
+    await this.client.srem(key, member);
+  }
+
+  async sMembers(key) {
+    return (await this.client.smembers(key)) || [];
+  }
+
+  async hSet(key, field, value) {
+    await this.client.hset(key, { [field]: String(value) });
+  }
+
+  async hGetAll(key) {
+    return (await this.client.hgetall(key)) || {};
+  }
+
+  async lPush(key, value) {
+    await this.client.lpush(key, value);
+  }
+
+  async lRange(key, start, stop) {
+    return (await this.client.lrange(key, start, stop)) || [];
+  }
+}
 
 class DatabaseService {
   constructor() {
     this._client = null;
     this._connecting = null;
+    this._mode = null; // 'upstash-rest' | 'redis-tcp' | 'memory'
   }
 
   async connect() {
-    if (this._client && this._client.isOpen) return;
+    if (this._client) {
+      if (this._mode === 'redis-tcp' && !this._client.isOpen) {
+        this._client = null;
+      } else {
+        return;
+      }
+    }
 
     if (!this._connecting) {
       this._connecting = (async () => {
-        this._client = redis.createClient({
-          url: process.env.REDIS_URL || 'redis://localhost:6379',
-        });
-        this._client.on('error', err =>
-          console.error('⚠️  Redis Client Error:', err.message)
-        );
-        await this._client.connect();
-        console.log('🔌 Connected to Redis');
-        this._connecting = null;
+        try {
+          const restUrl =
+            process.env.UPSTASH_REDIS_REST_URL ||
+            process.env.KV_REST_API_URL ||
+            null;
+          const restToken =
+            process.env.UPSTASH_REDIS_REST_TOKEN ||
+            process.env.KV_REST_API_TOKEN ||
+            null;
+          const tcpUrl =
+            process.env.REDIS_URL ||
+            process.env.KV_URL ||
+            null;
+
+          if (restUrl && restToken) {
+            this._client = new UpstashAdapter(restUrl, restToken);
+            this._mode = 'upstash-rest';
+            console.log('🔌 Connected to Vercel KV / Upstash Redis (REST)');
+          } else if (tcpUrl || !process.env.VERCEL) {
+            const url = tcpUrl || 'redis://localhost:6379';
+            const tcpClient = redis.createClient({ url });
+            tcpClient.on('error', err =>
+              console.error('⚠️  Redis Client Error:', err.message)
+            );
+            await tcpClient.connect();
+            this._client = tcpClient;
+            this._mode = 'redis-tcp';
+            console.log('🔌 Connected to Redis (TCP)');
+          } else {
+            console.warn(
+              '⚠️  No Vercel KV / Upstash Redis environment variables found ' +
+              '(KV_REST_API_URL, UPSTASH_REDIS_REST_URL, KV_URL, or REDIS_URL). ' +
+              'Using ephemeral in-memory store.'
+            );
+            this._client = new MemoryAdapter();
+            this._mode = 'memory';
+          }
+        } finally {
+          this._connecting = null;
+        }
       })();
     }
     await this._connecting;
@@ -55,18 +225,15 @@ class DatabaseService {
   async getEnvelope(envelopeId) {
     await this.connect();
     const raw = await this._client.get(`envelope:${envelopeId}`);
-    return raw ? JSON.parse(raw) : null;
+    return parseJson(raw);
   }
 
   async getAllEnvelopes() {
     await this.connect();
     const keys = await this._client.keys('envelope:*');
-    const envelopes = [];
-    for (const key of keys) {
-      const raw = await this._client.get(key);
-      if (raw) envelopes.push(JSON.parse(raw));
-    }
-    return envelopes;
+    if (!keys.length) return [];
+    const results = await Promise.all(keys.map(key => this._client.get(key)));
+    return results.map(parseJson).filter(Boolean);
   }
 
   async getLatestEnvelopeDate() {
@@ -97,12 +264,9 @@ class DatabaseService {
   async getActivePresentaciones() {
     await this.connect();
     const ids = await this._client.sMembers('active_presentaciones');
-    const envelopes = [];
-    for (const id of ids) {
-      const raw = await this._client.get(`envelope:${id}`);
-      if (raw) envelopes.push(JSON.parse(raw));
-    }
-    return envelopes;
+    if (!ids.length) return [];
+    const results = await Promise.all(ids.map(id => this._client.get(`envelope:${id}`)));
+    return results.map(parseJson).filter(Boolean);
   }
 
   async saveDocumentField(envelopeId, fieldName, value) {
@@ -112,7 +276,7 @@ class DatabaseService {
 
   async getDocumentFields(envelopeId) {
     await this.connect();
-    return await this._client.hGetAll(`document_field:${envelopeId}`);
+    return (await this._client.hGetAll(`document_field:${envelopeId}`)) || {};
   }
 
   // ─── DocuSign Connect (webhook) events ──────────────────────────────────
@@ -143,7 +307,7 @@ class DatabaseService {
   async getConnectEvent(eventId) {
     await this.connect();
     const raw = await this._client.get(`connect_event:${eventId}`);
-    return raw ? JSON.parse(raw) : null;
+    return parseJson(raw);
   }
 
   /**
@@ -153,12 +317,9 @@ class DatabaseService {
   async getConnectEvents(limit = 50) {
     await this.connect();
     const ids = await this._client.lRange('connect_events', 0, Math.max(0, limit - 1));
-    const events = [];
-    for (const id of ids) {
-      const raw = await this._client.get(`connect_event:${id}`);
-      if (raw) events.push(JSON.parse(raw));
-    }
-    return events;
+    if (!ids.length) return [];
+    const results = await Promise.all(ids.map(id => this._client.get(`connect_event:${id}`)));
+    return results.map(parseJson).filter(Boolean);
   }
 
   /**
@@ -167,12 +328,9 @@ class DatabaseService {
   async getConnectEventsByEnvelope(envelopeId, limit = 50) {
     await this.connect();
     const ids = await this._client.lRange(`connect_events:${envelopeId}`, 0, Math.max(0, limit - 1));
-    const events = [];
-    for (const id of ids) {
-      const raw = await this._client.get(`connect_event:${id}`);
-      if (raw) events.push(JSON.parse(raw));
-    }
-    return events;
+    if (!ids.length) return [];
+    const results = await Promise.all(ids.map(id => this._client.get(`connect_event:${id}`)));
+    return results.map(parseJson).filter(Boolean);
   }
 
   async logApiCall() {
