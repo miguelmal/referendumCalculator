@@ -84,15 +84,15 @@
       <div class="modal-body">
         <!-- Template Settings Form -->
         <section class="admin-section">
-          <h3>Configuración de Plantillas</h3>
-          <p style="font-size: 0.9rem; color: var(--text-muted); margin-bottom: 0.5rem;">Plantillas existentes (clic para editar):</p>
+          <h3>Gestión y Configuración de Plantillas (Redis)</h3>
           <div id="existing-templates" style="margin-bottom: 1.5rem; font-size: 0.9rem;">
-            <!-- Badges injected here -->
+            <!-- Templates injected here -->
           </div>
 
-          <form id="template-config-form" style="display:none;">
+          <form id="template-config-form" style="display:none; border-top: 1px solid var(--border); padding-top: 16px;">
+            <input type="hidden" id="templateId" name="templateId">
             <div class="form-group">
-              <label for="templateName">Nombre de la Plantilla (ej. Board Referendum)</label>
+              <label for="templateName">Nombre de la Plantilla</label>
               <input type="text" id="templateName" name="templateName" class="search-input" required>
             </div>
             <div class="form-group">
@@ -100,10 +100,13 @@
               <input type="text" id="voteOptions" name="voteOptions" class="search-input" placeholder="A Favor, No a Favor, Abstenido" required>
             </div>
             <div class="form-group">
-              <label for="contentField">Campo de Contenido (ej. Resumen)</label>
+              <label for="contentField">Campo de Contenido (ej. Asuntos a Aprobar, Resumen)</label>
               <input type="text" id="contentField" name="contentField" class="search-input" required>
             </div>
-            <button type="submit" class="btn btn-refresh">Guardar Plantilla</button>
+            <div style="display:flex; gap:10px; align-items:center;">
+              <button type="submit" class="btn btn-refresh" id="btn-save-template-config">💾 Guardar en Redis</button>
+              <button type="button" class="btn" id="btn-cancel-template-config">Cancelar</button>
+            </div>
           </form>
         </section>
       </div>

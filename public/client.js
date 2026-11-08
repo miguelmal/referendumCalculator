@@ -257,10 +257,11 @@ function bindSearch() {
 // ─── Admin Modal & Templates ───────────────────────────────────────────────
 
 function bindAdmin() {
-  const btnAdmin = document.getElementById('btn-admin');
-  const btnClose = document.getElementById('btn-close-admin');
-  const modal    = document.getElementById('admin-modal');
-  const form     = document.getElementById('template-config-form');
+  const btnAdmin  = document.getElementById('btn-admin');
+  const btnClose  = document.getElementById('btn-close-admin');
+  const btnCancel = document.getElementById('btn-cancel-template-config');
+  const modal     = document.getElementById('admin-modal');
+  const form      = document.getElementById('template-config-form');
 
   if (!btnAdmin || !modal) return;
 
@@ -273,15 +274,56 @@ function bindAdmin() {
     btnClose.addEventListener('click', () => modal.close());
   }
 
+  if (btnCancel && form) {
+    btnCancel.addEventListener('click', () => {
+      form.style.display = 'none';
+    });
+  }
+
   // Close when clicking outside the modal content
   modal.addEventListener('click', (e) => {
     if (e.target === modal) modal.close();
   });
 
   if (form) {
-    form.addEventListener('submit', (e) => {
+    form.addEventListener('submit', async (e) => {
       e.preventDefault();
-      showToast('ℹ️ Selección de plantilla actualizada.', 'success');
+      const templateId = document.getElementById('templateId').value;
+      const templateName = document.getElementById('templateName').value.trim();
+      const voteOptions = document.getElementById('voteOptions').value.trim();
+      const contentField = document.getElementById('contentField').value.trim();
+      const saveBtn = document.getElementById('btn-save-template-config');
+
+      if (!templateId) {
+        showToast('❌ Selecciona una plantilla primero.', 'error');
+        return;
+      }
+
+      if (saveBtn) {
+        saveBtn.disabled = true;
+        saveBtn.textContent = '⏳ Guardando…';
+      }
+
+      try {
+        const resp = await fetch(`/api/templates/${encodeURIComponent(templateId)}/config`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ templateName, voteOptions, contentField, enabled: true }),
+        });
+        const data = await resp.json();
+        if (!resp.ok) throw new Error(data.error || `HTTP ${resp.status}`);
+
+        showToast('✅ Configuración de plantilla guardada en Redis.', 'success');
+        form.style.display = 'none';
+        renderAdminTemplates(data);
+      } catch (err) {
+        showToast(`❌ Error al guardar: ${err.message}`, 'error');
+      } finally {
+        if (saveBtn) {
+          saveBtn.disabled = false;
+          saveBtn.textContent = '💾 Guardar en Redis';
+        }
+      }
     });
   }
 }
@@ -293,7 +335,7 @@ async function loadAdminTemplates() {
   container.innerHTML = `
     <div style="display:flex;align-items:center;gap:10px;padding:12px 0;color:var(--text-muted);">
       <span class="spinner" style="width:16px;height:16px;"></span>
-      Cargando plantillas disponibles de DocuSign…
+      Cargando plantillas desde Redis…
     </div>`;
 
   try {
@@ -313,11 +355,168 @@ async function loadAdminTemplates() {
   }
 }
 
-function renderAdminTemplates({ templates = [], detectedCategories = [], docusignError = null }) {
+async function syncAdminTemplates(full = false) {
+  const btn = document.getElementById(full ? 'btn-sync-templates-full' : 'btn-sync-templates-inc');
+  if (btn) {
+    btn.disabled = true;
+    btn.textContent = '⏳ Sincronizando…';
+  }
+
+  try {
+    const resp = await fetch('/api/templates/sync', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ full }),
+    });
+    const data = await resp.json();
+    if (!resp.ok) throw new Error(data.error || `HTTP ${resp.status}`);
+
+    showToast(`✅ Sincronizadas ${data.syncedCount || 0} plantillas desde DocuSign.`, 'success');
+    renderAdminTemplates(data);
+  } catch (err) {
+    showToast(`❌ Error sincronizando plantillas: ${err.message}`, 'error');
+    if (btn) {
+      btn.disabled = false;
+      btn.textContent = full ? '🔁 Re-sincronizar Todas' : '🔄 Buscar Nuevas';
+    }
+  }
+}
+
+async function refreshSingleTemplateUI(templateId, btnEl) {
+  if (btnEl) {
+    btnEl.disabled = true;
+    btnEl.textContent = '⏳…';
+  }
+  try {
+    const resp = await fetch(`/api/templates/${encodeURIComponent(templateId)}/refresh`, {
+      method: 'POST',
+    });
+    const data = await resp.json();
+    if (!resp.ok) throw new Error(data.error || `HTTP ${resp.status}`);
+
+    const t = data.template || {};
+    const statusLabel = t.isValid
+      ? `✅ Válida (${t.hasRadioButtons ? '🔘 Radio' : ''}${t.hasRadioButtons && t.hasCheckboxes ? ' + ' : ''}${t.hasCheckboxes ? '☑️ Checkbox' : ''})`
+      : '🚫 Sin opciones de voto';
+    showToast(`🔄 "${t.name}" actualizada → ${statusLabel}`, 'success');
+    renderAdminTemplates(data);
+  } catch (err) {
+    showToast(`❌ Error actualizando plantilla: ${err.message}`, 'error');
+    if (btnEl) {
+      btnEl.disabled = false;
+      btnEl.textContent = '🔄 Actualizar';
+    }
+  }
+}
+
+function buildTemplateControlBadges(t) {
+  const badges = [];
+  if (t.hasRadioButtons) {
+    const groupSummary = (t.radioGroups || [])
+      .map(rg => `${rg.groupName}: ${(rg.options || []).join(', ')}`)
+      .join(' | ');
+    badges.push(
+      `<span class="badge badge-completed" title="${escapeHtml(groupSummary)}">🔘 Radio (${(t.radioGroups || []).length})</span>`
+    );
+  }
+  if (t.hasCheckboxes) {
+    badges.push(
+      `<span class="badge badge-sent" title="${escapeHtml((t.checkboxOptions || []).join(', '))}">☑️ Checkboxes (${(t.checkboxOptions || []).length})</span>`
+    );
+  }
+  if (t.config && t.config.updatedAt) {
+    badges.push(
+      `<span class="badge" style="background:#eff6ff;color:#1e40af;border:1px solid #bfdbfe;">⚙️ Configurada</span>`
+    );
+  }
+  return badges.join(' ');
+}
+
+function buildTemplateRowHtml(t, isValidSection) {
+  const createdStr = t.created ? new Date(t.created).toLocaleDateString('es-PR') : 'n/a';
+  const syncedStr  = t.lastSyncedAt ? new Date(t.lastSyncedAt).toLocaleTimeString('es-PR') : '';
+  const effectiveOpts = (t.config && t.config.voteOptions && t.config.voteOptions.length)
+    ? t.config.voteOptions
+    : (t.voteOptions || []);
+  const effectiveContentField = (t.config && t.config.contentField)
+    ? t.config.contentField
+    : ((t.textFields && t.textFields[0]) || 'Asuntos a Aprobar');
+
+  const radioDetailHtml = (t.radioGroups || []).map(rg =>
+    `<div style="font-size:0.78rem;color:var(--text-muted);margin-top:2px;">
+      🔘 <strong>${escapeHtml(rg.groupName)}</strong>: ${escapeHtml((rg.options || []).join(', '))}
+    </div>`
+  ).join('');
+
+  const checkboxDetailHtml = (t.checkboxOptions && t.checkboxOptions.length > 0)
+    ? `<div style="font-size:0.78rem;color:var(--text-muted);margin-top:2px;">
+        ☑️ <strong>Checkboxes</strong>: ${escapeHtml(t.checkboxOptions.join(', '))}
+      </div>`
+    : '';
+
+  return `
+    <li class="recipient-row" style="align-items:flex-start;gap:12px;padding:10px 12px;">
+      <div class="rec-info" style="flex:1;min-width:0;">
+        <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;">
+          <span class="rec-name" style="font-weight:600;">📄 ${escapeHtml(t.name)}</span>
+          ${buildTemplateControlBadges(t)}
+        </div>
+        <div style="font-size:0.75rem;color:var(--text-muted);margin-top:2px;">
+          <span style="font-family:monospace;">ID: ${escapeHtml(t.templateId)}</span>
+          &bull; Creada: ${createdStr}
+          ${syncedStr ? `&bull; Revisada: ${syncedStr}` : ''}
+        </div>
+        ${radioDetailHtml}
+        ${checkboxDetailHtml}
+      </div>
+      <div style="display:flex;gap:6px;flex-shrink:0;align-items:center;">
+        ${isValidSection ? `
+          <button type="button" class="btn" style="padding:5px 10px;font-size:0.78rem;"
+            data-action="config"
+            data-template-id="${escapeHtml(t.templateId)}"
+            data-template-name="${escapeHtml((t.config && t.config.templateName) || t.name)}"
+            data-vote-options="${escapeHtml(effectiveOpts.join(', '))}"
+            data-content-field="${escapeHtml(effectiveContentField)}"
+            title="Configurar opciones y campo de contenido">
+            ⚙️ Configurar
+          </button>
+        ` : ''}
+        <button type="button" class="btn" style="padding:5px 10px;font-size:0.78rem;"
+          data-action="refresh"
+          data-template-id="${escapeHtml(t.templateId)}"
+          title="Volver a consultar esta plantilla en DocuSign">
+          🔄 Actualizar
+        </button>
+      </div>
+    </li>`;
+}
+
+function renderAdminTemplates({ validTemplates = [], invalidTemplates = [], syncMeta = {}, docusignError = null }) {
   const container = document.getElementById('existing-templates');
   if (!container) return;
 
-  let html = '';
+  const lastSyncStr = syncMeta.templates_last_synced_at
+    ? new Date(syncMeta.templates_last_synced_at).toLocaleString('es-PR')
+    : 'Nunca';
+  const watermarkStr = syncMeta.templates_last_created_at
+    ? new Date(syncMeta.templates_last_created_at).toLocaleDateString('es-PR')
+    : 'Inicio';
+
+  let html = `
+    <div style="display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:10px;background:var(--surface-2);padding:10px 14px;border-radius:8px;border:1px solid var(--border);margin-bottom:16px;">
+      <div style="font-size:0.8rem;color:var(--text-muted);">
+        <div>🕒 Última sincronización: <strong>${escapeHtml(lastSyncStr)}</strong></div>
+        <div>📅 Cursor fecha creación (<code>from_date</code>): <strong>${escapeHtml(watermarkStr)}</strong></div>
+      </div>
+      <div style="display:flex;gap:8px;">
+        <button type="button" class="btn btn-refresh" id="btn-sync-templates-inc" style="padding:6px 12px;font-size:0.8rem;" title="Busca en DocuSign solo plantillas creadas después de ${escapeHtml(watermarkStr)}">
+          🔄 Buscar Nuevas
+        </button>
+        <button type="button" class="btn" id="btn-sync-templates-full" style="padding:6px 12px;font-size:0.8rem;" title="Vuelve a inspeccionar todas las plantillas en DocuSign">
+          🔁 Re-sincronizar Todas
+        </button>
+      </div>
+    </div>`;
 
   if (docusignError) {
     html += `
@@ -326,70 +525,72 @@ function renderAdminTemplates({ templates = [], detectedCategories = [], docusig
       </div>`;
   }
 
-  // 1. DocuSign Account Templates
-  html += `<h4 style="font-size:0.85rem;text-transform:uppercase;color:var(--text-muted);margin:0 0 8px 0;letter-spacing:0.04em;">📄 Plantillas en DocuSign (${templates.length})</h4>`;
-  if (templates.length === 0) {
-    html += `<p style="color:var(--text-muted);font-size:0.85rem;margin-bottom:16px;">No se encontraron plantillas en la cuenta de DocuSign.</p>`;
+  // 1. Valid Voting Templates (have Radio Buttons or Checkboxes)
+  html += `
+    <h4 style="font-size:0.85rem;text-transform:uppercase;color:#065f46;margin:0 0 8px 0;letter-spacing:0.04em;">
+      ✅ Plantillas Válidas para Votación — Con Radio Buttons / Checkboxes (${validTemplates.length})
+    </h4>`;
+
+  if (validTemplates.length === 0) {
+    html += `<p style="color:var(--text-muted);font-size:0.85rem;margin-bottom:16px;">No hay plantillas con Radio Buttons ni Checkboxes almacenadas.</p>`;
   } else {
     html += `<ul class="recipients-list" style="margin-bottom:18px;">`;
-    for (const t of templates) {
-      const modDate = t.lastModified ? new Date(t.lastModified).toLocaleDateString('es-PR') : '';
-      const folder  = t.folderName ? `📁 ${escapeHtml(t.folderName)}` : '';
-      const desc    = t.description ? `<div style="font-size:0.8rem;color:var(--text-muted);margin-top:2px;">${escapeHtml(t.description)}</div>` : '';
-      html += `
-        <li class="recipient-row" style="cursor:pointer;" data-template-name="${escapeHtml(t.name)}" data-template-id="${escapeHtml(t.templateId)}">
-          <div class="rec-info">
-            <span class="rec-name">📄 ${escapeHtml(t.name)}</span>
-            <span class="rec-role" style="font-family:monospace;font-size:0.75rem;">ID: ${escapeHtml(t.templateId)}</span>
-            ${folder ? `<span class="rec-role">${folder}</span>` : ''}
-            ${desc}
-          </div>
-          <span class="rec-role">${modDate ? `📅 ${modDate}` : ''}</span>
-        </li>`;
+    for (const t of validTemplates) {
+      html += buildTemplateRowHtml(t, true);
     }
     html += `</ul>`;
   }
 
-  // 2. Detected Categories from Envelopes
-  html += `<h4 style="font-size:0.85rem;text-transform:uppercase;color:var(--text-muted);margin:12px 0 8px 0;letter-spacing:0.04em;">🗂️ Categorías Activas en Acuerdos (${detectedCategories.length})</h4>`;
-  if (detectedCategories.length === 0) {
-    html += `<p style="color:var(--text-muted);font-size:0.85rem;">Sin categorías detectadas aún.</p>`;
-  } else {
-    html += `<div style="display:flex;flex-wrap:wrap;gap:6px;">`;
-    for (const cat of detectedCategories) {
-      const opts = (cat.voteOptions || []).join(', ');
-      html += `
-        <span class="template-badge" data-cat-name="${escapeHtml(cat.name)}" data-cat-opts="${escapeHtml(opts)}" title="Opciones: ${escapeHtml(opts || 'N/A')}">
-          ${escapeHtml(cat.name)} (${cat.envelopeCount})
-        </span>`;
-    }
-    html += `</div>`;
-  }
+  // 2. Invalid / Non-Voting Templates (stored in Redis, separated view)
+  html += `
+    <details style="margin-top:12px;border:1px solid var(--border);border-radius:8px;padding:10px 14px;background:var(--surface-2);">
+      <summary style="cursor:pointer;font-size:0.85rem;font-weight:600;color:var(--text-muted);user-select:none;">
+        🚫 Plantillas sin Opciones de Voto (${invalidTemplates.length}) — Guardadas en caché (clic para ver/actualizar)
+      </summary>
+      <div style="margin-top:10px;">
+        ${invalidTemplates.length === 0
+          ? `<p style="color:var(--text-muted);font-size:0.82rem;margin:0;">Ninguna plantilla descartada.</p>`
+          : `<ul class="recipients-list">${invalidTemplates.map(t => buildTemplateRowHtml(t, false)).join('')}</ul>`
+        }
+      </div>
+    </details>`;
 
   container.innerHTML = html;
 
-  // Bind click on DocuSign template rows or category badges to inspect/populate form
-  container.querySelectorAll('[data-template-name]').forEach(row => {
-    row.addEventListener('click', () => {
-      selectTemplateInAdminForm(row.dataset.templateName, '');
+  // Bind incremental & full sync buttons
+  const btnInc  = document.getElementById('btn-sync-templates-inc');
+  const btnFull = document.getElementById('btn-sync-templates-full');
+  if (btnInc)  btnInc.addEventListener('click', () => syncAdminTemplates(false));
+  if (btnFull) btnFull.addEventListener('click', () => syncAdminTemplates(true));
+
+  // Bind per-template Config and Refresh buttons
+  container.querySelectorAll('button[data-action="config"]').forEach(btn => {
+    btn.addEventListener('click', () => {
+      selectTemplateInAdminForm(
+        btn.dataset.templateId,
+        btn.dataset.templateName,
+        btn.dataset.voteOptions,
+        btn.dataset.contentField
+      );
     });
   });
 
-  container.querySelectorAll('[data-cat-name]').forEach(badge => {
-    badge.addEventListener('click', () => {
-      selectTemplateInAdminForm(badge.dataset.catName, badge.dataset.catOpts || '');
+  container.querySelectorAll('button[data-action="refresh"]').forEach(btn => {
+    btn.addEventListener('click', () => {
+      refreshSingleTemplateUI(btn.dataset.templateId, btn);
     });
   });
 }
 
-function selectTemplateInAdminForm(name, voteOptionsCsv) {
+function selectTemplateInAdminForm(templateId, name, voteOptionsCsv, contentField) {
   const form = document.getElementById('template-config-form');
   if (!form) return;
   form.style.display = 'block';
+  document.getElementById('templateId').value = templateId || '';
   document.getElementById('templateName').value = name || '';
   document.getElementById('voteOptions').value = voteOptionsCsv || '';
-  document.getElementById('contentField').value =
-    name === 'Presentacion de Casos' ? 'Asunto' : 'Resumen';
+  document.getElementById('contentField').value = contentField || 'Asuntos a Aprobar';
+  form.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
 }
 
 // ─── Admin Refresh ─────────────────────────────────────────────────────────

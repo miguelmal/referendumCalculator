@@ -4,7 +4,12 @@ const scheduler    = require('../services/schedulerService');
 const emailService = require('../services/emailService');
 const docusign     = require('../services/docusignService');
 const config       = require('../config');
-const { refreshCache, getSyncStatus } = require('../services/syncService');
+const {
+  refreshCache,
+  getSyncStatus,
+  syncTemplates,
+  refreshSingleTemplate,
+} = require('../services/syncService');
 
 const router = express.Router();
 
@@ -108,64 +113,111 @@ router.post('/close/:envelopeId', async (req, res) => {
   }
 });
 
-/** GET /templates — list all available templates from DocuSign + detected categories */
+/**
+ * Helper to load templates from Redis and partition into valid vs non-voting templates
+ */
+async function buildTemplatesPayload() {
+  const allTemplates = await db.getAllTemplates();
+  allTemplates.sort((a, b) => new Date(b.created || 0) - new Date(a.created || 0));
+
+  const validTemplates = allTemplates.filter(t => t.isValid);
+  const invalidTemplates = allTemplates.filter(t => !t.isValid);
+  const syncMeta = await db.getAllSyncMeta();
+
+  return {
+    validTemplates,
+    invalidTemplates,
+    syncMeta,
+  };
+}
+
+/** GET /templates — serve stored templates from Redis (initial sync only if never synced) */
 router.get('/templates', async (req, res) => {
   try {
-    console.log('📋 [GET /api/templates] Fetching available templates from DocuSign...');
-    const envConfig = config.docusign;
-    let docusignTemplates = [];
+    let syncMeta = await db.getAllSyncMeta();
+    let allTemplates = await db.getAllTemplates();
     let docusignError = null;
 
-    try {
-      const accessToken = await docusign.getAccessToken(envConfig);
-      const { accountId, baseUri } = await docusign.getAccountInfo(accessToken, envConfig);
-      const rawTemplates = await docusign.listTemplates(baseUri, accountId, accessToken);
-      docusignTemplates = rawTemplates.map(t => ({
-        templateId: t.templateId,
-        name: t.name || '(Sin nombre)',
-        description: t.description || '',
-        shared: t.shared === 'true' || t.shared === true,
-        folderName: t.folderName || '',
-        created: t.created || null,
-        lastModified: t.lastModified || null,
-      }));
-    } catch (dsErr) {
-      console.error('⚠️  [GET /api/templates] DocuSign template fetch error:', dsErr.message);
-      docusignError = dsErr.message;
-    }
-
-    // Also summarize template categories inferred from cached envelopes
-    const envelopes = await db.getAllEnvelopes();
-    const detectedMap = new Map();
-    for (const env of envelopes) {
-      const type = env.templateType || 'Desconocido';
-      if (!detectedMap.has(type)) {
-        detectedMap.set(type, {
-          name: type,
-          envelopeCount: 0,
-          voteOptions: new Set(),
-        });
-      }
-      const entry = detectedMap.get(type);
-      entry.envelopeCount += 1;
-      for (const choice of (env.availableChoices || [])) {
-        if (choice !== 'Sin voto') entry.voteOptions.add(choice);
+    if (allTemplates.length === 0 && !syncMeta.templates_last_synced_at) {
+      console.log('📋 [GET /api/templates] No templates cached in Redis yet — performing initial sync...');
+      try {
+        await syncTemplates({ full: true });
+      } catch (dsErr) {
+        console.error('⚠️  [GET /api/templates] Initial DocuSign template sync error:', dsErr.message);
+        docusignError = dsErr.message;
       }
     }
 
-    const detectedCategories = Array.from(detectedMap.values()).map(item => ({
-      name: item.name,
-      envelopeCount: item.envelopeCount,
-      voteOptions: Array.from(item.voteOptions),
-    }));
-
+    const payload = await buildTemplatesPayload();
     res.json({
-      templates: docusignTemplates,
-      detectedCategories,
+      ...payload,
       docusignError,
     });
   } catch (err) {
     console.error('❌ [GET /api/templates] error:', err.stack || err.message);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+/** POST /templates/sync — incremental (by created date) or full sync of templates from DocuSign */
+router.post('/templates/sync', async (req, res) => {
+  try {
+    const full = Boolean((req.body && req.body.full) || req.query.full === 'true');
+    const syncResult = await syncTemplates({ full });
+    const payload = await buildTemplatesPayload();
+    res.json({
+      success: true,
+      syncedCount: syncResult.syncedCount,
+      ...payload,
+    });
+  } catch (err) {
+    console.error('❌ [POST /api/templates/sync] error:', err.stack || err.message);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+/** POST /templates/:templateId/refresh — refresh a single template from DocuSign and update Redis */
+router.post('/templates/:templateId/refresh', async (req, res) => {
+  try {
+    const template = await refreshSingleTemplate(req.params.templateId);
+    const payload = await buildTemplatesPayload();
+    res.json({
+      success: true,
+      template,
+      ...payload,
+    });
+  } catch (err) {
+    console.error(`❌ [POST /api/templates/${req.params.templateId}/refresh] error:`, err.stack || err.message);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+/** POST /templates/:templateId/config — save admin config for a template in Redis */
+router.post('/templates/:templateId/config', async (req, res) => {
+  try {
+    const { templateName, voteOptions, contentField, enabled = true } = req.body || {};
+    const parsedOptions = Array.isArray(voteOptions)
+      ? voteOptions
+      : String(voteOptions || '')
+          .split(',')
+          .map(s => s.trim())
+          .filter(Boolean);
+
+    const updated = await db.saveTemplateConfig(req.params.templateId, {
+      templateName: templateName || '',
+      voteOptions: parsedOptions,
+      contentField: contentField || '',
+      enabled: Boolean(enabled),
+    });
+
+    const payload = await buildTemplatesPayload();
+    res.json({
+      success: true,
+      template: updated,
+      ...payload,
+    });
+  } catch (err) {
+    console.error(`❌ [POST /api/templates/${req.params.templateId}/config] error:`, err.stack || err.message);
     res.status(500).json({ error: err.message });
   }
 });

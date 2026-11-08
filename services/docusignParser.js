@@ -210,10 +210,12 @@ function parseContentText(docGenMap, flatTabs, envelope) {
  * @returns {string|null}
  */
 function getStandardChoice(rawLabel) {
-  const cleanLabel = rawLabel.split('|')[0].trim();
+  if (!rawLabel) return null;
+  const cleanLabel = String(rawLabel).split('|')[0].trim();
+  if (!cleanLabel) return null;
 
-  // If the label is an auto-generated DocuSign Checkbox UUID, ignore it
-  if (/^Checkbox\s+[a-f0-9\-]+$/i.test(cleanLabel)) {
+  // If the label is an auto-generated DocuSign Checkbox/Radio UUID, ignore it
+  if (/^(Checkbox|Radio)\s+[a-f0-9\-]+$/i.test(cleanLabel)) {
     return null;
   }
 
@@ -221,23 +223,115 @@ function getStandardChoice(rawLabel) {
 }
 
 /**
+ * Inspects a template's (or envelope's) recipients object for voting controls:
+ * radioGroupTabs, checkboxTabs, and textTabs.
+ *
+ * @param {object} recipients - DocuSign recipients object (with include_tabs=true).
+ * @returns {{
+ *   hasRadioButtons: boolean,
+ *   hasCheckboxes: boolean,
+ *   isValid: boolean,
+ *   voteControlType: 'radio'|'checkbox'|'both'|'none',
+ *   radioGroups: Array<{ groupName: string, options: string[] }>,
+ *   checkboxOptions: string[],
+ *   voteOptions: string[],
+ *   textFields: string[]
+ * }}
+ */
+function inspectTemplateTabs(recipients = {}) {
+  const groups = [
+    ...(recipients.signers || []),
+    ...(recipients.inPersonSigners || []),
+    ...(recipients.agents || []),
+    ...(recipients.editors || []),
+  ];
+
+  const radioGroupMap = new Map(); // groupName -> Set(options)
+  const checkboxSet = new Set();
+  const textFieldSet = new Set();
+
+  for (const person of groups) {
+    const tabs = person.tabs || {};
+
+    // 1. Radio Button Groups (tabs.radioGroupTabs)
+    for (const rg of (tabs.radioGroupTabs || [])) {
+      const groupName = (rg.groupName || 'Radio Group').trim();
+      const radios = rg.radios || [];
+      for (const r of radios) {
+        const opt = getStandardChoice(r.value || r.tabLabel);
+        if (opt) {
+          if (!radioGroupMap.has(groupName)) {
+            radioGroupMap.set(groupName, new Set());
+          }
+          radioGroupMap.get(groupName).add(opt);
+        }
+      }
+    }
+
+    // 2. Checkboxes (tabs.checkboxTabs)
+    for (const cb of (tabs.checkboxTabs || [])) {
+      const opt = getStandardChoice(cb.tabLabel || cb.name);
+      if (opt) checkboxSet.add(opt);
+    }
+
+    // 3. Text / Data tabs (useful for contentField selection in Admin)
+    for (const [tabType, tabList] of Object.entries(tabs)) {
+      if (tabType === 'checkboxTabs' || tabType === 'radioGroupTabs') continue;
+      if (!Array.isArray(tabList)) continue;
+      for (const t of tabList) {
+        if (t.tabLabel && !/^(Text|Label|Note)\s+[a-f0-9\-]+$/i.test(t.tabLabel.trim())) {
+          textFieldSet.add(t.tabLabel.trim());
+        }
+      }
+    }
+  }
+
+  const radioGroups = Array.from(radioGroupMap.entries()).map(([groupName, set]) => ({
+    groupName,
+    options: Array.from(set),
+  }));
+  const checkboxOptions = Array.from(checkboxSet);
+
+  const voteOptionsSet = new Set();
+  for (const rg of radioGroups) {
+    for (const opt of rg.options) voteOptionsSet.add(opt);
+  }
+  for (const opt of checkboxOptions) {
+    voteOptionsSet.add(opt);
+  }
+
+  const hasRadioButtons = radioGroups.length > 0;
+  const hasCheckboxes = checkboxOptions.length > 0;
+  const isValid = hasRadioButtons || hasCheckboxes;
+  const voteControlType =
+    hasRadioButtons && hasCheckboxes
+      ? 'both'
+      : hasRadioButtons
+        ? 'radio'
+        : hasCheckboxes
+          ? 'checkbox'
+          : 'none';
+
+  return {
+    hasRadioButtons,
+    hasCheckboxes,
+    isValid,
+    voteControlType,
+    radioGroups,
+    checkboxOptions,
+    voteOptions: Array.from(voteOptionsSet),
+    textFields: Array.from(textFieldSet),
+  };
+}
+
+/**
  * Returns true if the recipients object contains at least one valid
- * (non-UUID) checkbox tab — i.e. the template is a voting document.
+ * voting control (radio button group or non-UUID checkbox tab).
  * @param {object} recipients - Raw DocuSign recipients object.
  * @returns {boolean}
  */
 function hasCheckboxes(recipients) {
-  const groups = [
-    ...(recipients.signers || []),
-    ...(recipients.inPersonSigners || []),
-  ];
-  for (const person of groups) {
-    const checkboxTabs = (person.tabs && person.tabs.checkboxTabs) || [];
-    for (const tab of checkboxTabs) {
-      if (getStandardChoice(tab.tabLabel)) return true;
-    }
-  }
-  return false;
+  return inspectTemplateTabs(recipients).isValid;
 }
 
 // ─── Main Envelope Builder ─────────────────────────────────────────────────
@@ -272,16 +366,35 @@ function buildNormalizedEnvelope(envelope, recipients, documents, docGenFormFiel
 
   for (const signer of allSigners) {
     const checkboxTabs = (signer.tabs && signer.tabs.checkboxTabs) || [];
+    const radioGroupTabs = (signer.tabs && signer.tabs.radioGroupTabs) || [];
     const selectedChoices = [];
 
-    // Check if this signer has any valid checkbox tabs (i.e. they are a voter)
+    // Check if this signer has any valid checkbox tabs or radio group options (i.e. they are a voter)
     const validCheckboxes = checkboxTabs.filter(tab => getStandardChoice(tab.tabLabel));
-    if (validCheckboxes.length === 0) continue; // Not a voter (e.g. Director Ejecutivo)
+    const validRadios = [];
+    for (const rg of radioGroupTabs) {
+      for (const r of (rg.radios || [])) {
+        if (getStandardChoice(r.value || r.tabLabel)) {
+          validRadios.push(r);
+        }
+      }
+    }
+
+    if (validCheckboxes.length === 0 && validRadios.length === 0) continue; // Not a voter (e.g. Director Ejecutivo)
 
     for (const tab of validCheckboxes) {
       const choice = getStandardChoice(tab.tabLabel);
       availableChoices.add(choice);
       if (tab.selected === 'true' || tab.selected === true) {
+        selectedChoices.push(choice);
+        totals[choice] = (totals[choice] || 0) + 1;
+      }
+    }
+
+    for (const radio of validRadios) {
+      const choice = getStandardChoice(radio.value || radio.tabLabel);
+      availableChoices.add(choice);
+      if (radio.selected === 'true' || radio.selected === true) {
         selectedChoices.push(choice);
         totals[choice] = (totals[choice] || 0) + 1;
       }
@@ -369,6 +482,7 @@ module.exports = {
   parseExpiresAt,
   parseContentText,
   getStandardChoice,
+  inspectTemplateTabs,
   hasCheckboxes,
   buildNormalizedEnvelope,
 };

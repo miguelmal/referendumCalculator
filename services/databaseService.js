@@ -364,6 +364,68 @@ class DatabaseService {
     return results.map(parseJson).filter(Boolean);
   }
 
+  // ─── DocuSign Templates & Admin Configuration ───────────────────────────
+  // Keys:
+  //   template:{templateId}  → JSON of stored template + tab inspection + admin config
+  //   sync_meta              → Hash tracking incremental sync dates (e.g. templates_last_created_at)
+
+  async saveTemplate(templateId, data) {
+    await this.connect();
+    const existing = await this.getTemplate(templateId);
+    const merged = existing ? { ...existing, ...data } : data;
+    // Preserve custom admin config when re-syncing template structure from DocuSign
+    if (existing && existing.config && !data.config) {
+      merged.config = existing.config;
+    }
+    await this._client.set(`template:${templateId}`, JSON.stringify(merged));
+    return merged;
+  }
+
+  async getTemplate(templateId) {
+    await this.connect();
+    const raw = await this._client.get(`template:${templateId}`);
+    return parseJson(raw);
+  }
+
+  async getAllTemplates() {
+    await this.connect();
+    const keys = await this._client.keys('template:*');
+    if (!keys.length) return [];
+    const results = await Promise.all(keys.map(key => this._client.get(key)));
+    return results.map(parseJson).filter(Boolean);
+  }
+
+  async saveTemplateConfig(templateId, configData) {
+    await this.connect();
+    const existing = (await this.getTemplate(templateId)) || { templateId };
+    const updated = {
+      ...existing,
+      config: {
+        ...(existing.config || {}),
+        ...configData,
+        updatedAt: new Date().toISOString(),
+      },
+    };
+    await this._client.set(`template:${templateId}`, JSON.stringify(updated));
+    return updated;
+  }
+
+  async getSyncMeta(field) {
+    await this.connect();
+    const all = (await this._client.hGetAll('sync_meta')) || {};
+    return all[field] || null;
+  }
+
+  async setSyncMeta(field, value) {
+    await this.connect();
+    await this._client.hSet('sync_meta', field, String(value));
+  }
+
+  async getAllSyncMeta() {
+    await this.connect();
+    return (await this._client.hGetAll('sync_meta')) || {};
+  }
+
   async logApiCall() {
     // Redis cache does not persist API audit logs.
   }

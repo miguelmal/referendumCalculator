@@ -299,11 +299,21 @@ async function getDocGenFormFields(baseUri, accountId, accessToken, envelopeId) 
 }
 
 /**
- * Lists all available templates in the DocuSign account
+ * Lists available templates in the DocuSign account, optionally filtered since fromDate.
+ * @param {string} baseUri
+ * @param {string} accountId
+ * @param {string} accessToken
+ * @param {string|null} [fromDate=null] - ISO timestamp for incremental sync
+ * @param {'created'|'modified'} [dateFilterType='created']
  */
-async function listTemplates(baseUri, accountId, accessToken) {
-  const url = `${baseUri}/restapi/v2.1/accounts/${accountId}/templates`;
-  const response = await loggedFetch(url, {
+async function listTemplates(baseUri, accountId, accessToken, fromDate = null, dateFilterType = 'created') {
+  const url = new URL(`${baseUri}/restapi/v2.1/accounts/${accountId}/templates`);
+  if (fromDate) {
+    url.searchParams.append('from_date', fromDate);
+    url.searchParams.append('from_to_status', dateFilterType);
+  }
+
+  const response = await loggedFetch(url.toString(), {
     headers: { Authorization: `Bearer ${accessToken}` }
   });
 
@@ -315,11 +325,45 @@ async function listTemplates(baseUri, accountId, accessToken) {
   return data.envelopeTemplates || [];
 }
 
+/**
+ * Fetches metadata for a single template
+ */
+async function getTemplateDetails(baseUri, accountId, accessToken, templateId) {
+  const url = `${baseUri}/restapi/v2.1/accounts/${accountId}/templates/${templateId}`;
+  const response = await loggedFetch(url, {
+    headers: { Authorization: `Bearer ${accessToken}` }
+  });
+
+  if (!response.ok) {
+    throw new Error(`Failed to fetch template ${templateId}: ${response.statusText} (${response.status})`);
+  }
+
+  return await safeJson(response, "DocuSign API Error");
+}
+
+/**
+ * Fetches recipients + tabs (radioGroupTabs, checkboxTabs, textTabs) for a single template
+ */
+async function getTemplateRecipientsWithTabs(baseUri, accountId, accessToken, templateId) {
+  const url = `${baseUri}/restapi/v2.1/accounts/${accountId}/templates/${templateId}/recipients?include_tabs=true`;
+  const response = await loggedFetch(url, {
+    headers: { Authorization: `Bearer ${accessToken}` }
+  });
+
+  if (!response.ok) {
+    throw new Error(`Failed to fetch template recipients for ${templateId}: ${response.statusText} (${response.status})`);
+  }
+
+  return await safeJson(response, "DocuSign API Error");
+}
+
 module.exports = {
   getAccessToken,
   getAccountInfo,
   listEnvelopes,
   listTemplates,
+  getTemplateDetails,
+  getTemplateRecipientsWithTabs,
   getEnvelopeRecipientsWithTabs,
   getEnvelopeDocuments,
   getDocGenFormFields,
