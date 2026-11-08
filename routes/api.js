@@ -19,9 +19,10 @@ router.get('/votes', async (req, res) => {
     }
 
     const envString = process.env.NODE_ENV === 'production' ? 'PROD' : 'DEV';
-    res.json({ envelopes, overallTotals, environment: envString });
+    console.log(`📊 [GET /api/votes] Serving ${envelopes.length} envelopes (dbMode: ${db.getDiagnostics().mode})`);
+    res.json({ envelopes, overallTotals, environment: envString, diagnostics: db.getDiagnostics() });
   } catch (err) {
-    console.error('GET /api/votes error:', err.message);
+    console.error('❌ [GET /api/votes] error:', err.stack || err.message);
     res.status(500).json({ error: err.message });
   }
 });
@@ -29,11 +30,13 @@ router.get('/votes', async (req, res) => {
 /** POST /refresh — admin trigger to re-sync from DocuSign */
 router.post('/refresh', async (req, res) => {
   try {
+    console.log('🔄 [POST /api/refresh] Manual sync triggered...');
     await refreshCache();
     await scheduler._tick();
+    console.log('✅ [POST /api/refresh] Manual sync completed');
     res.json({ success: true, message: 'Cache refreshed from DocuSign' });
   } catch (err) {
-    console.error('POST /api/refresh error:', err.message);
+    console.error('❌ [POST /api/refresh] error:', err.stack || err.message);
     res.status(500).json({ error: err.message });
   }
 });
@@ -41,11 +44,13 @@ router.post('/refresh', async (req, res) => {
 /** GET /cron — Vercel Cron endpoint to sync cache & process expired envelopes */
 router.get('/cron', async (req, res) => {
   try {
+    console.log('⏰ [GET /api/cron] Cron sync triggered...');
     await refreshCache();
     await scheduler._tick();
+    console.log('✅ [GET /api/cron] Cron sync completed');
     res.json({ success: true, message: 'Cron sync and scheduler tick completed' });
   } catch (err) {
-    console.error('GET /api/cron error:', err.message);
+    console.error('❌ [GET /api/cron] error:', err.stack || err.message);
     res.status(500).json({ error: err.message });
   }
 });

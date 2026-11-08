@@ -21,10 +21,21 @@ document.addEventListener('DOMContentLoaded', () => {
 async function fetchData() {
   showContainerLoading();
   try {
+    console.log('📡 [Client] Fetching /api/votes...');
     const resp = await fetch('/api/votes', { cache: 'no-store' });
-    if (!resp.ok) throw new Error(`HTTP ${resp.status} ${resp.statusText}`);
+    if (!resp.ok) {
+      const errBody = await resp.text().catch(() => '');
+      console.error('❌ [Client] /api/votes failed:', {
+        url: resp.url,
+        status: resp.status,
+        statusText: resp.statusText,
+        body: errBody,
+      });
+      throw new Error(`GET /api/votes → HTTP ${resp.status} ${resp.statusText}${errBody ? ` (${errBody.slice(0, 120)})` : ''}`);
+    }
 
-    const { envelopes = [], overallTotals = {}, environment = 'DEV' } = await resp.json();
+    const { envelopes = [], overallTotals = {}, environment = 'DEV', diagnostics } = await resp.json();
+    console.log('✅ [Client] /api/votes loaded:', { count: envelopes.length, environment, diagnostics });
     allEnvelopes = envelopes;
 
     const titleEl = document.querySelector('.header-title');
@@ -214,8 +225,18 @@ function bindRefresh() {
     container.style.opacity = '0.5';
 
     try {
+      console.log('📡 [Client] Triggering POST /api/refresh...');
       const resp = await fetch('/api/refresh', { method: 'POST' });
-      if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+      if (!resp.ok) {
+        const errBody = await resp.text().catch(() => '');
+        console.error('❌ [Client] /api/refresh failed:', {
+          url: resp.url,
+          status: resp.status,
+          statusText: resp.statusText,
+          body: errBody,
+        });
+        throw new Error(`POST /api/refresh → HTTP ${resp.status} ${resp.statusText}${errBody ? ` (${errBody.slice(0, 120)})` : ''}`);
+      }
       showToast('✅ Datos actualizados. Recargando...', 'success');
       
       // Wait a moment so the user reads the toast, then reload elegantly

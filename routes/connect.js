@@ -19,13 +19,20 @@ const webhookRouter = express.Router();
  */
 webhookRouter.post('/', rawBody, async (req, res) => {
   try {
+    const bodyLen = Buffer.isBuffer(req.body) ? req.body.length : String(req.body || '').length;
+    console.log(
+      `🔔 [POST /connect] Webhook recibido: bytes=${bodyLen} ` +
+      `content-type=${req.headers['content-type'] || 'n/a'} ` +
+      `hasSignature=${Boolean(req.headers['x-docusign-signature-1'] || req.headers['X-DocuSign-Signature-1'])}`
+    );
+
     const result = await connectService.handleConnectEvent({
       rawBody: req.body, // Buffer gracias a express.raw
       headers: req.headers,
     });
 
     if (!result.stored && result.reason === 'invalid_signature') {
-      console.warn('⚠️  Connect event rechazado: firma HMAC inválida');
+      console.warn('⚠️  [POST /connect] Connect event rechazado: firma HMAC inválida');
       return res.status(401).json({ error: 'invalid_signature' });
     }
 
@@ -35,7 +42,7 @@ webhookRouter.post('/', rawBody, async (req, res) => {
       verified: result.verified,
     });
   } catch (err) {
-    console.error('POST /connect error:', err.message);
+    console.error('❌ [POST /connect] Error:', err.stack || err.message);
     // Aun en error devolvemos 200 para evitar reintentos agresivos de Connect,
     // pero dejamos traza en logs. (Se puede endurecer más adelante.)
     return res.status(200).json({ received: false, error: err.message });

@@ -174,35 +174,66 @@ class DatabaseService {
             process.env.KV_URL ||
             null;
 
+          console.log('🗄️  [DB] Initializing connection...', {
+            isVercel: Boolean(process.env.VERCEL),
+            vercelEnv: process.env.VERCEL_ENV || null,
+            hasUpstashRestUrl: Boolean(process.env.UPSTASH_REDIS_REST_URL),
+            hasKvRestApiUrl: Boolean(process.env.KV_REST_API_URL),
+            hasRedisUrl: Boolean(process.env.REDIS_URL),
+            hasKvUrl: Boolean(process.env.KV_URL),
+          });
+
           if (restUrl && restToken) {
             this._client = new UpstashAdapter(restUrl, restToken);
             this._mode = 'upstash-rest';
-            console.log('🔌 Connected to Vercel KV / Upstash Redis (REST)');
+            console.log('🔌 [DB] Connected to Vercel KV / Upstash Redis (REST)');
           } else if (tcpUrl || !process.env.VERCEL) {
             const url = tcpUrl || 'redis://localhost:6379';
             const tcpClient = redis.createClient({ url });
             tcpClient.on('error', err =>
-              console.error('⚠️  Redis Client Error:', err.message)
+              console.error('⚠️  [DB] Redis TCP Client Error:', err.stack || err.message)
             );
             await tcpClient.connect();
             this._client = tcpClient;
             this._mode = 'redis-tcp';
-            console.log('🔌 Connected to Redis (TCP)');
+            console.log('🔌 [DB] Connected to Redis (TCP)');
           } else {
             console.warn(
-              '⚠️  No Vercel KV / Upstash Redis environment variables found ' +
+              '⚠️  [DB] No Vercel KV / Upstash Redis environment variables found ' +
               '(KV_REST_API_URL, UPSTASH_REDIS_REST_URL, KV_URL, or REDIS_URL). ' +
               'Using ephemeral in-memory store.'
             );
             this._client = new MemoryAdapter();
             this._mode = 'memory';
           }
+        } catch (err) {
+          console.error('❌ [DB] Connection failed:', err.stack || err.message);
+          throw err;
         } finally {
           this._connecting = null;
         }
       })();
     }
     await this._connecting;
+  }
+
+  getDiagnostics() {
+    return {
+      mode: this._mode || 'uninitialized',
+      isVercel: Boolean(process.env.VERCEL),
+      vercelEnv: process.env.VERCEL_ENV || null,
+      envConfigured: {
+        upstashRest: Boolean(
+          (process.env.UPSTASH_REDIS_REST_URL && process.env.UPSTASH_REDIS_REST_TOKEN) ||
+          (process.env.KV_REST_API_URL && process.env.KV_REST_API_TOKEN)
+        ),
+        redisTcp: Boolean(process.env.REDIS_URL || process.env.KV_URL),
+        docusignKey: Boolean(process.env.DOCUSIGN_INTEGRATION_KEY),
+        docusignUser: Boolean(process.env.DOCUSIGN_USER_ID),
+        docusignRsaKey: Boolean(process.env.DOCUSIGN_RSA_PRIVATE_KEY),
+        connectHmac: Boolean(process.env.DOCUSIGN_CONNECT_HMAC_KEY),
+      },
+    };
   }
 
   /** No schema; kept so boot can call a single setup hook. */
