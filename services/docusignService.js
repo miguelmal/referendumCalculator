@@ -61,10 +61,14 @@ async function getAccessToken(envConfig) {
     );
   }
 
-  let privateKey = envConfig.privateKey || process.env.DOCUSIGN_RSA_PRIVATE_KEY || null;
+  let privateKey =
+    envConfig.privateKey ||
+    process.env.DOCUSIGN_RSA_PRIVATE_KEY ||
+    process.env.DOCUSIGN_PRIVATE_KEY ||
+    null;
   if (privateKey) {
-    // Secrets often store PEM with literal \n sequences
-    privateKey = privateKey.replace(/\\n/g, '\n').trim();
+    // Strip optional wrapping quotes and convert literal \n sequences to newlines
+    privateKey = privateKey.trim().replace(/^["']|["']$/g, '').replace(/\\n/g, '\n').trim();
   } else {
     const privateKeyPath = path.resolve(envConfig.privateKeyPath || 'dev.pem');
     if (!fs.existsSync(privateKeyPath)) {
