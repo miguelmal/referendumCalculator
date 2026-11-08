@@ -13,6 +13,7 @@ let tabConfig = {};
 document.addEventListener('DOMContentLoaded', () => {
   bindRefresh();
   bindSearch();
+  bindAdmin();
   fetchData();
 
   // On serverless (Vercel), background timers don't stay alive when idle.
@@ -251,6 +252,144 @@ function bindSearch() {
   document.getElementById('search-filter').addEventListener('input', renderActiveTab);
   document.getElementById('sort-select').addEventListener('change', renderActiveTab);
   document.getElementById('show-completed-toggle').addEventListener('change', renderActiveTab);
+}
+
+// ─── Admin Modal & Templates ───────────────────────────────────────────────
+
+function bindAdmin() {
+  const btnAdmin = document.getElementById('btn-admin');
+  const btnClose = document.getElementById('btn-close-admin');
+  const modal    = document.getElementById('admin-modal');
+  const form     = document.getElementById('template-config-form');
+
+  if (!btnAdmin || !modal) return;
+
+  btnAdmin.addEventListener('click', () => {
+    modal.showModal();
+    loadAdminTemplates();
+  });
+
+  if (btnClose) {
+    btnClose.addEventListener('click', () => modal.close());
+  }
+
+  // Close when clicking outside the modal content
+  modal.addEventListener('click', (e) => {
+    if (e.target === modal) modal.close();
+  });
+
+  if (form) {
+    form.addEventListener('submit', (e) => {
+      e.preventDefault();
+      showToast('ℹ️ Selección de plantilla actualizada.', 'success');
+    });
+  }
+}
+
+async function loadAdminTemplates() {
+  const container = document.getElementById('existing-templates');
+  if (!container) return;
+
+  container.innerHTML = `
+    <div style="display:flex;align-items:center;gap:10px;padding:12px 0;color:var(--text-muted);">
+      <span class="spinner" style="width:16px;height:16px;"></span>
+      Cargando plantillas disponibles de DocuSign…
+    </div>`;
+
+  try {
+    console.log('📡 [Client] Fetching /api/templates...');
+    const resp = await fetch('/api/templates', { cache: 'no-store' });
+    if (!resp.ok) {
+      const errBody = await resp.text().catch(() => '');
+      throw new Error(`HTTP ${resp.status} ${resp.statusText}${errBody ? ` (${errBody.slice(0, 120)})` : ''}`);
+    }
+
+    const data = await resp.json();
+    console.log('✅ [Client] /api/templates loaded:', data);
+    renderAdminTemplates(data);
+  } catch (err) {
+    console.error('❌ [Client] /api/templates failed:', err);
+    container.innerHTML = `<div class="error-state" style="padding:12px;border-radius:8px;">❌ Error al cargar plantillas: ${escapeHtml(err.message)}</div>`;
+  }
+}
+
+function renderAdminTemplates({ templates = [], detectedCategories = [], docusignError = null }) {
+  const container = document.getElementById('existing-templates');
+  if (!container) return;
+
+  let html = '';
+
+  if (docusignError) {
+    html += `
+      <div class="error-state" style="padding:10px 14px;border-radius:8px;margin-bottom:14px;font-size:0.85rem;">
+        ⚠️ Error consultando plantillas en DocuSign: ${escapeHtml(docusignError)}
+      </div>`;
+  }
+
+  // 1. DocuSign Account Templates
+  html += `<h4 style="font-size:0.85rem;text-transform:uppercase;color:var(--text-muted);margin:0 0 8px 0;letter-spacing:0.04em;">📄 Plantillas en DocuSign (${templates.length})</h4>`;
+  if (templates.length === 0) {
+    html += `<p style="color:var(--text-muted);font-size:0.85rem;margin-bottom:16px;">No se encontraron plantillas en la cuenta de DocuSign.</p>`;
+  } else {
+    html += `<ul class="recipients-list" style="margin-bottom:18px;">`;
+    for (const t of templates) {
+      const modDate = t.lastModified ? new Date(t.lastModified).toLocaleDateString('es-PR') : '';
+      const folder  = t.folderName ? `📁 ${escapeHtml(t.folderName)}` : '';
+      const desc    = t.description ? `<div style="font-size:0.8rem;color:var(--text-muted);margin-top:2px;">${escapeHtml(t.description)}</div>` : '';
+      html += `
+        <li class="recipient-row" style="cursor:pointer;" data-template-name="${escapeHtml(t.name)}" data-template-id="${escapeHtml(t.templateId)}">
+          <div class="rec-info">
+            <span class="rec-name">📄 ${escapeHtml(t.name)}</span>
+            <span class="rec-role" style="font-family:monospace;font-size:0.75rem;">ID: ${escapeHtml(t.templateId)}</span>
+            ${folder ? `<span class="rec-role">${folder}</span>` : ''}
+            ${desc}
+          </div>
+          <span class="rec-role">${modDate ? `📅 ${modDate}` : ''}</span>
+        </li>`;
+    }
+    html += `</ul>`;
+  }
+
+  // 2. Detected Categories from Envelopes
+  html += `<h4 style="font-size:0.85rem;text-transform:uppercase;color:var(--text-muted);margin:12px 0 8px 0;letter-spacing:0.04em;">🗂️ Categorías Activas en Acuerdos (${detectedCategories.length})</h4>`;
+  if (detectedCategories.length === 0) {
+    html += `<p style="color:var(--text-muted);font-size:0.85rem;">Sin categorías detectadas aún.</p>`;
+  } else {
+    html += `<div style="display:flex;flex-wrap:wrap;gap:6px;">`;
+    for (const cat of detectedCategories) {
+      const opts = (cat.voteOptions || []).join(', ');
+      html += `
+        <span class="template-badge" data-cat-name="${escapeHtml(cat.name)}" data-cat-opts="${escapeHtml(opts)}" title="Opciones: ${escapeHtml(opts || 'N/A')}">
+          ${escapeHtml(cat.name)} (${cat.envelopeCount})
+        </span>`;
+    }
+    html += `</div>`;
+  }
+
+  container.innerHTML = html;
+
+  // Bind click on DocuSign template rows or category badges to inspect/populate form
+  container.querySelectorAll('[data-template-name]').forEach(row => {
+    row.addEventListener('click', () => {
+      selectTemplateInAdminForm(row.dataset.templateName, '');
+    });
+  });
+
+  container.querySelectorAll('[data-cat-name]').forEach(badge => {
+    badge.addEventListener('click', () => {
+      selectTemplateInAdminForm(badge.dataset.catName, badge.dataset.catOpts || '');
+    });
+  });
+}
+
+function selectTemplateInAdminForm(name, voteOptionsCsv) {
+  const form = document.getElementById('template-config-form');
+  if (!form) return;
+  form.style.display = 'block';
+  document.getElementById('templateName').value = name || '';
+  document.getElementById('voteOptions').value = voteOptionsCsv || '';
+  document.getElementById('contentField').value =
+    name === 'Presentacion de Casos' ? 'Asunto' : 'Resumen';
 }
 
 // ─── Admin Refresh ─────────────────────────────────────────────────────────

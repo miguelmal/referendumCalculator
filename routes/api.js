@@ -2,6 +2,8 @@ const express = require('express');
 const db           = require('../services/databaseService');
 const scheduler    = require('../services/schedulerService');
 const emailService = require('../services/emailService');
+const docusign     = require('../services/docusignService');
+const config       = require('../config');
 const { refreshCache, getSyncStatus } = require('../services/syncService');
 
 const router = express.Router();
@@ -106,6 +108,66 @@ router.post('/close/:envelopeId', async (req, res) => {
   }
 });
 
+/** GET /templates — list all available templates from DocuSign + detected categories */
+router.get('/templates', async (req, res) => {
+  try {
+    console.log('📋 [GET /api/templates] Fetching available templates from DocuSign...');
+    const envConfig = config.docusign;
+    let docusignTemplates = [];
+    let docusignError = null;
 
+    try {
+      const accessToken = await docusign.getAccessToken(envConfig);
+      const { accountId, baseUri } = await docusign.getAccountInfo(accessToken, envConfig);
+      const rawTemplates = await docusign.listTemplates(baseUri, accountId, accessToken);
+      docusignTemplates = rawTemplates.map(t => ({
+        templateId: t.templateId,
+        name: t.name || '(Sin nombre)',
+        description: t.description || '',
+        shared: t.shared === 'true' || t.shared === true,
+        folderName: t.folderName || '',
+        created: t.created || null,
+        lastModified: t.lastModified || null,
+      }));
+    } catch (dsErr) {
+      console.error('⚠️  [GET /api/templates] DocuSign template fetch error:', dsErr.message);
+      docusignError = dsErr.message;
+    }
+
+    // Also summarize template categories inferred from cached envelopes
+    const envelopes = await db.getAllEnvelopes();
+    const detectedMap = new Map();
+    for (const env of envelopes) {
+      const type = env.templateType || 'Desconocido';
+      if (!detectedMap.has(type)) {
+        detectedMap.set(type, {
+          name: type,
+          envelopeCount: 0,
+          voteOptions: new Set(),
+        });
+      }
+      const entry = detectedMap.get(type);
+      entry.envelopeCount += 1;
+      for (const choice of (env.availableChoices || [])) {
+        if (choice !== 'Sin voto') entry.voteOptions.add(choice);
+      }
+    }
+
+    const detectedCategories = Array.from(detectedMap.values()).map(item => ({
+      name: item.name,
+      envelopeCount: item.envelopeCount,
+      voteOptions: Array.from(item.voteOptions),
+    }));
+
+    res.json({
+      templates: docusignTemplates,
+      detectedCategories,
+      docusignError,
+    });
+  } catch (err) {
+    console.error('❌ [GET /api/templates] error:', err.stack || err.message);
+    res.status(500).json({ error: err.message });
+  }
+});
 
 module.exports = router;

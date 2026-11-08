@@ -298,10 +298,28 @@ async function getDocGenFormFields(baseUri, accountId, accessToken, envelopeId) 
   return await safeJson(response, "DocuSign API Error");
 }
 
+/**
+ * Lists all available templates in the DocuSign account
+ */
+async function listTemplates(baseUri, accountId, accessToken) {
+  const url = `${baseUri}/restapi/v2.1/accounts/${accountId}/templates`;
+  const response = await loggedFetch(url, {
+    headers: { Authorization: `Bearer ${accessToken}` }
+  });
+
+  if (!response.ok) {
+    throw new Error(`Failed to list templates: ${response.statusText} (${response.status})`);
+  }
+
+  const data = await safeJson(response, "DocuSign API Error");
+  return data.envelopeTemplates || [];
+}
+
 module.exports = {
   getAccessToken,
   getAccountInfo,
   listEnvelopes,
+  listTemplates,
   getEnvelopeRecipientsWithTabs,
   getEnvelopeDocuments,
   getDocGenFormFields,
