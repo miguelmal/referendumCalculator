@@ -5,18 +5,30 @@ const emailService = require('./emailService');
 const scheduler = require('./schedulerService');
 const config = require('../config');
 
+let lastSyncStatus = {
+  lastSyncAt: null,
+  lastSyncError: null,
+};
+
+function getSyncStatus() {
+  return { ...lastSyncStatus };
+}
+
 /**
  * Main synchronization routine.
  * Iterates through all configured DocuSign environments, fetches envelopes,
  * and normalizes the vote counts into Redis.
  */
-async function refreshCache() {
+async function refreshCache({ throwOnError = false } = {}) {
   const { docusign: envConfig } = config;
   const fromDate = await db.getLatestEnvelopeDate();
   const envelopeStatus = '';
   
   if (!envConfig.integrationKey) {
-    console.error('❌ DocuSign environment is not fully configured.');
+    const msg = 'DocuSign environment is not fully configured (missing DOCUSIGN_INTEGRATION_KEY).';
+    console.error(`❌ ${msg}`);
+    lastSyncStatus = { lastSyncAt: new Date().toISOString(), lastSyncError: msg };
+    if (throwOnError) throw new Error(msg);
     return;
   }
 
@@ -33,102 +45,113 @@ async function refreshCache() {
       envelopeStatus
     );
 
-    const envs = envelopesData || [];
-    console.log(`   Found ${envs.length} envelopes. Syncing details...`);
+    const envs = (envelopesData || []).filter(e => e && e.envelopeId);
+    console.log(`   Found ${envs.length} envelopes. Syncing details in parallel batches...`);
 
-    for (const env of envs) {
-      if (!env.envelopeId) continue;
-      
-      const [recipients, documents, docGenMapResult] = await Promise.all([
-        ds.getEnvelopeRecipientsWithTabs(baseUri, accountId, accessToken, env.envelopeId),
-        ds.getEnvelopeDocuments(baseUri, accountId, accessToken, env.envelopeId),
-        ds.getDocGenFormFields(baseUri, accountId, accessToken, env.envelopeId)
-      ]);
-      
-      let docGenMap = docGenMapResult;
+    const CONCURRENCY = 5;
+    for (let i = 0; i < envs.length; i += CONCURRENCY) {
+      const batch = envs.slice(i, i + CONCURRENCY);
+      await Promise.all(batch.map(async (env) => {
+        const [recipients, documents, docGenMapResult] = await Promise.all([
+          ds.getEnvelopeRecipientsWithTabs(baseUri, accountId, accessToken, env.envelopeId),
+          ds.getEnvelopeDocuments(baseUri, accountId, accessToken, env.envelopeId),
+          ds.getDocGenFormFields(baseUri, accountId, accessToken, env.envelopeId)
+        ]);
+        
+        let docGenMap = docGenMapResult;
 
-      // Only process envelopes whose template has checkboxes (voting documents)
-      if (!parser.hasCheckboxes(recipients)) {
-        continue;
-      }
-      
-      const normalized = parser.buildNormalizedEnvelope(
-        env, recipients, documents, docGenMap
-      );
-      
-      // If the incoming envelope is voided, merge its status with our local historical data
-      if (normalized.status === 'voided') {
-         const existingEnv = await db.getEnvelope(normalized.envelopeId);
-         if (existingEnv) {
-            Object.assign(normalized, {
-               totals: existingEnv.totals,
-               recipients: existingEnv.recipients,
-               availableChoices: existingEnv.availableChoices,
-               templateFields: existingEnv.templateFields,
-               totalVoters: existingEnv.totalVoters,
-               votedCount: existingEnv.votedCount,
-               noVoteCount: existingEnv.noVoteCount,
-               quorumThreshold: existingEnv.quorumThreshold,
-               hasQuorum: existingEnv.hasQuorum
-            });
-         }
-      }
+        // Only process envelopes whose template has checkboxes (voting documents)
+        if (!parser.hasCheckboxes(recipients)) {
+          return;
+        }
+        
+        const normalized = parser.buildNormalizedEnvelope(
+          env, recipients, documents, docGenMap
+        );
+        
+        // If the incoming envelope is voided, merge its status with our local historical data
+        if (normalized.status === 'voided') {
+           const existingEnv = await db.getEnvelope(normalized.envelopeId);
+           if (existingEnv) {
+              Object.assign(normalized, {
+                 totals: existingEnv.totals,
+                 recipients: existingEnv.recipients,
+                 availableChoices: existingEnv.availableChoices,
+                 templateFields: existingEnv.templateFields,
+                 totalVoters: existingEnv.totalVoters,
+                 votedCount: existingEnv.votedCount,
+                 noVoteCount: existingEnv.noVoteCount,
+                 quorumThreshold: existingEnv.quorumThreshold,
+                 hasQuorum: existingEnv.hasQuorum
+              });
+           }
+        }
 
-      // Detect transition to 'completed' — all members voted
-      if (normalized.status === 'completed') {
-        const existingEnv = await db.getEnvelope(normalized.envelopeId);
-        const wasCompleted = existingEnv && existingEnv.status === 'completed';
-        if (!wasCompleted) {
-          console.log(`🎉 Envelope ${normalized.envelopeId} completed — all votes in. Sending report...`);
-          try {
-            await emailService.sendVoteReport(normalized, 'completed');
-          } catch (err) {
-            console.error(`Email failed for completed ${normalized.envelopeId}:`, err.message);
+        // Detect transition to 'completed' — all members voted
+        if (normalized.status === 'completed') {
+          const existingEnv = await db.getEnvelope(normalized.envelopeId);
+          const wasCompleted = existingEnv && existingEnv.status === 'completed';
+          if (!wasCompleted) {
+            console.log(`🎉 Envelope ${normalized.envelopeId} completed — all votes in. Sending report...`);
+            try {
+              await emailService.sendVoteReport(normalized, 'completed');
+            } catch (err) {
+              console.error(`Email failed for completed ${normalized.envelopeId}:`, err.message);
+            }
           }
         }
-      }
-      
-      await db.saveEnvelope(normalized.envelopeId, normalized);
+        
+        await db.saveEnvelope(normalized.envelopeId, normalized);
 
-      // Presentacion de Casos index logic
-      if (normalized.templateType === 'Presentacion de Casos' &&
-          (normalized.status === 'sent' || normalized.status === 'delivered') &&
-          normalized.expiresAt) {
-        await db.addActivePresentacion(normalized.envelopeId);
+        // Presentacion de Casos index logic
+        if (normalized.templateType === 'Presentacion de Casos' &&
+            (normalized.status === 'sent' || normalized.status === 'delivered') &&
+            normalized.expiresAt) {
+          await db.addActivePresentacion(normalized.envelopeId);
 
-        // ── Feature: majority-quorum close ──────────────────────────────────
-        // If a simple majority (floor(n/2)+1) of eligible voters have voted,
-        // close the envelope as COMPLETED without voiding it in DocuSign.
-        if (normalized.hasQuorum) {
-          console.log(
-            `🗳️  Envelope ${normalized.envelopeId} reached quorum ` +
-            `(${normalized.votedCount}/${normalized.totalVoters}, need ${normalized.quorumThreshold}). ` +
-            `Completing without voiding.`
-          );
-          try {
-            await scheduler.closeEnvelope(normalized, 'quorum');
-          } catch (err) {
-            console.error(`Quorum close failed for ${normalized.envelopeId}:`, err.message);
+          // ── Feature: majority-quorum close ──────────────────────────────────
+          // If a simple majority (floor(n/2)+1) of eligible voters have voted,
+          // close the envelope as COMPLETED without voiding it in DocuSign.
+          if (normalized.hasQuorum) {
+            console.log(
+              `🗳️  Envelope ${normalized.envelopeId} reached quorum ` +
+              `(${normalized.votedCount}/${normalized.totalVoters}, need ${normalized.quorumThreshold}). ` +
+              `Completing without voiding.`
+            );
+            try {
+              await scheduler.closeEnvelope(normalized, 'quorum');
+            } catch (err) {
+              console.error(`Quorum close failed for ${normalized.envelopeId}:`, err.message);
+            }
+            return; // Envelope is closed; skip deadline adjustment.
           }
-          continue; // Envelope is closed; skip deadline adjustment.
-        }
 
-        // ── Feature: deadline (expiration) adjustment ───────────────────────
-        // If DocuSign would expire the envelope BEFORE the configured voting
-        // deadline, push the DocuSign expiration out so voting isn't cut short.
-        try {
-          await ensureExpirationCoversVotingDeadline(
-            baseUri, accountId, accessToken, normalized
-          );
-        } catch (err) {
-          console.error(`Deadline adjustment failed for ${normalized.envelopeId}:`, err.message);
+          // ── Feature: deadline (expiration) adjustment ───────────────────────
+          // If DocuSign would expire the envelope BEFORE the configured voting
+          // deadline, push the DocuSign expiration out so voting isn't cut short.
+          try {
+            await ensureExpirationCoversVotingDeadline(
+              baseUri, accountId, accessToken, normalized
+            );
+          } catch (err) {
+            console.error(`Deadline adjustment failed for ${normalized.envelopeId}:`, err.message);
+          }
+        } else {
+          await db.removeActivePresentacion(normalized.envelopeId);
         }
-      } else {
-        await db.removeActivePresentacion(normalized.envelopeId);
-      }
+      }));
     }
+    lastSyncStatus = {
+      lastSyncAt: new Date().toISOString(),
+      lastSyncError: null,
+    };
   } catch (err) {
-    console.error(`❌ Error syncing:`, err);
+    console.error(`❌ Error syncing:`, err.stack || err);
+    lastSyncStatus = {
+      lastSyncAt: new Date().toISOString(),
+      lastSyncError: err.message || String(err),
+    };
+    if (throwOnError) throw err;
   }
 }
 
@@ -193,5 +216,6 @@ async function ensureExpirationCoversVotingDeadline(baseUri, accountId, accessTo
 }
 
 module.exports = {
-  refreshCache
+  refreshCache,
+  getSyncStatus,
 };

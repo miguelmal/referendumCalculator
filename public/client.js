@@ -14,9 +14,27 @@ document.addEventListener('DOMContentLoaded', () => {
   bindRefresh();
   bindSearch();
   fetchData();
+
+  // On serverless (Vercel), background timers don't stay alive when idle.
+  // Check every 60s while the dashboard is open for expired Presentaciones.
+  setInterval(() => {
+    const now = new Date();
+    const hasNewlyExpired = allEnvelopes.some(env =>
+      env.templateType === 'Presentacion de Casos' &&
+      (env.status === 'sent' || env.status === 'delivered') &&
+      env.expiresAt &&
+      now >= new Date(env.expiresAt)
+    );
+    if (hasNewlyExpired) {
+      console.log('⏰ [Client] Detected expired Presentación de Casos — triggering check...');
+      fetchData();
+    }
+  }, 60 * 1000);
 });
 
 // ─── Data Fetching ─────────────────────────────────────────────────────────
+
+let initialAutoSyncAttempted = false;
 
 async function fetchData() {
   showContainerLoading();
@@ -34,9 +52,26 @@ async function fetchData() {
       throw new Error(`GET /api/votes → HTTP ${resp.status} ${resp.statusText}${errBody ? ` (${errBody.slice(0, 120)})` : ''}`);
     }
 
-    const { envelopes = [], overallTotals = {}, environment = 'DEV', diagnostics } = await resp.json();
-    console.log('✅ [Client] /api/votes loaded:', { count: envelopes.length, environment, diagnostics });
+    const { envelopes = [], overallTotals = {}, environment = 'DEV', diagnostics, syncStatus } = await resp.json();
+    console.log('✅ [Client] /api/votes loaded:', { count: envelopes.length, environment, diagnostics, syncStatus });
+
+    // If cache is empty on first load, trigger a one-time sync from DocuSign automatically
+    if (envelopes.length === 0 && !initialAutoSyncAttempted) {
+      initialAutoSyncAttempted = true;
+      console.log('🔄 [Client] Cache is empty on initial load — triggering POST /api/refresh...');
+      const syncResp = await fetch('/api/refresh', { method: 'POST' });
+      if (!syncResp.ok) {
+        const errData = await syncResp.json().catch(() => ({}));
+        throw new Error(errData.error || `POST /api/refresh → HTTP ${syncResp.status}`);
+      }
+      return await fetchData();
+    }
+
     allEnvelopes = envelopes;
+
+    if (syncStatus && syncStatus.lastSyncError) {
+      console.warn('⚠️ [Client] Last DocuSign sync reported error:', syncStatus.lastSyncError);
+    }
 
     const titleEl = document.querySelector('.header-title');
     if (titleEl) {
@@ -73,7 +108,7 @@ async function fetchData() {
       };
     });
 
-    buildTabsUI();
+    buildTabsUI(syncStatus);
 
     document.getElementById('account-name-badge').textContent =
       `${envelopes.length} acuerdos cargados`;
@@ -85,12 +120,19 @@ async function fetchData() {
 
 // ─── Tab Logic ─────────────────────────────────────────────────────────────
 
-function buildTabsUI() {
+function buildTabsUI(syncStatus) {
   const tabNav = document.getElementById('tab-nav');
   tabNav.innerHTML = '';
   
   const tabKeys = Object.keys(tabConfig);
-  if (tabKeys.length === 0) return;
+  if (tabKeys.length === 0) {
+    if (syncStatus && syncStatus.lastSyncError) {
+      showContainerError(`No se pudo sincronizar con DocuSign: ${syncStatus.lastSyncError}`);
+    } else {
+      renderAgreements([]);
+    }
+    return;
+  }
   
   if (!activeTab || !tabConfig[activeTab]) {
     activeTab = tabKeys[0];

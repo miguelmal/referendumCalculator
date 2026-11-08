@@ -2,13 +2,16 @@ const express = require('express');
 const db           = require('../services/databaseService');
 const scheduler    = require('../services/schedulerService');
 const emailService = require('../services/emailService');
-const { refreshCache } = require('../services/syncService');
+const { refreshCache, getSyncStatus } = require('../services/syncService');
 
 const router = express.Router();
 
 /** GET /votes — serve all envelopes from Redis */
 router.get('/votes', async (req, res) => {
   try {
+    // Check and close any expired Presentacion de Casos before reading envelopes
+    await scheduler._tick();
+
     const envelopes = await db.getAllEnvelopes();
 
     const overallTotals = {};
@@ -19,8 +22,18 @@ router.get('/votes', async (req, res) => {
     }
 
     const envString = process.env.NODE_ENV === 'production' ? 'PROD' : 'DEV';
-    console.log(`📊 [GET /api/votes] Serving ${envelopes.length} envelopes (dbMode: ${db.getDiagnostics().mode})`);
-    res.json({ envelopes, overallTotals, environment: envString, diagnostics: db.getDiagnostics() });
+    const syncStatus = getSyncStatus();
+    console.log(
+      `📊 [GET /api/votes] Serving ${envelopes.length} envelopes ` +
+      `(dbMode: ${db.getDiagnostics().mode}, lastSyncError: ${syncStatus.lastSyncError || 'none'})`
+    );
+    res.json({
+      envelopes,
+      overallTotals,
+      environment: envString,
+      diagnostics: db.getDiagnostics(),
+      syncStatus,
+    });
   } catch (err) {
     console.error('❌ [GET /api/votes] error:', err.stack || err.message);
     res.status(500).json({ error: err.message });
@@ -31,10 +44,10 @@ router.get('/votes', async (req, res) => {
 router.post('/refresh', async (req, res) => {
   try {
     console.log('🔄 [POST /api/refresh] Manual sync triggered...');
-    await refreshCache();
+    await refreshCache({ throwOnError: true });
     await scheduler._tick();
     console.log('✅ [POST /api/refresh] Manual sync completed');
-    res.json({ success: true, message: 'Cache refreshed from DocuSign' });
+    res.json({ success: true, message: 'Cache refreshed from DocuSign', syncStatus: getSyncStatus() });
   } catch (err) {
     console.error('❌ [POST /api/refresh] error:', err.stack || err.message);
     res.status(500).json({ error: err.message });

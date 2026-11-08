@@ -1,6 +1,7 @@
 const express = require('express');
 const db = require('../services/databaseService');
 const connectService = require('../services/connectService');
+const scheduler = require('../services/schedulerService');
 
 // Captura el cuerpo EXACTO (sin parsear) para poder verificar el HMAC.
 // Aceptamos cualquier content-type: Connect puede mandar JSON o XML.
@@ -35,6 +36,9 @@ webhookRouter.post('/', rawBody, async (req, res) => {
       console.warn('⚠️  [POST /connect] Connect event rechazado: firma HMAC inválida');
       return res.status(401).json({ error: 'invalid_signature' });
     }
+
+    // Opportunistically check for any expired Presentaciones when a webhook arrives
+    scheduler._tick().catch(err => console.error('⚠️  [POST /connect] scheduler tick error:', err.message));
 
     return res.status(200).json({
       received: true,
