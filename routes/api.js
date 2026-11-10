@@ -5,15 +5,13 @@ const emailService = require('../services/emailService');
 const docusign     = require('../services/docusignService');
 const config       = require('../config');
 const {
-  refreshCache,
-  getSyncStatus,
   syncTemplates,
   refreshSingleTemplate,
 } = require('../services/syncService');
 
 const router = express.Router();
 
-/** GET /votes — serve all envelopes from Redis */
+/** GET /votes — serve all envelopes stored from Connect webhooks */
 router.get('/votes', async (req, res) => {
   try {
     // Check and close any expired Presentacion de Casos before reading envelopes
@@ -29,17 +27,14 @@ router.get('/votes', async (req, res) => {
     }
 
     const envString = process.env.NODE_ENV === 'production' ? 'PROD' : 'DEV';
-    const syncStatus = getSyncStatus();
     console.log(
-      `📊 [GET /api/votes] Serving ${envelopes.length} envelopes ` +
-      `(dbMode: ${db.getDiagnostics().mode}, lastSyncError: ${syncStatus.lastSyncError || 'none'})`
+      `📊 [GET /api/votes] Serving ${envelopes.length} envelopes (dbMode: ${db.getDiagnostics().mode})`
     );
     res.json({
       envelopes,
       overallTotals,
       environment: envString,
       diagnostics: db.getDiagnostics(),
-      syncStatus,
     });
   } catch (err) {
     console.error('❌ [GET /api/votes] error:', err.stack || err.message);
@@ -47,28 +42,24 @@ router.get('/votes', async (req, res) => {
   }
 });
 
-/** POST /refresh — admin trigger to re-sync from DocuSign */
+/** POST /refresh — re-check expired envelopes and reload stored state (no envelope polling) */
 router.post('/refresh', async (req, res) => {
   try {
-    console.log('🔄 [POST /api/refresh] Manual sync triggered...');
-    await refreshCache({ throwOnError: true });
     await scheduler._tick();
-    console.log('✅ [POST /api/refresh] Manual sync completed');
-    res.json({ success: true, message: 'Cache refreshed from DocuSign', syncStatus: getSyncStatus() });
+    res.json({ success: true, message: 'Stored envelopes reloaded' });
   } catch (err) {
     console.error('❌ [POST /api/refresh] error:', err.stack || err.message);
     res.status(500).json({ error: err.message });
   }
 });
 
-/** GET /cron — Vercel Cron endpoint to sync cache & process expired envelopes */
+/** GET /cron — Vercel Cron endpoint to process expired envelopes (no envelope polling) */
 router.get('/cron', async (req, res) => {
   try {
-    console.log('⏰ [GET /api/cron] Cron sync triggered...');
-    await refreshCache();
+    console.log('⏰ [GET /api/cron] Scheduler tick triggered...');
     await scheduler._tick();
-    console.log('✅ [GET /api/cron] Cron sync completed');
-    res.json({ success: true, message: 'Cron sync and scheduler tick completed' });
+    console.log('✅ [GET /api/cron] Scheduler tick completed');
+    res.json({ success: true, message: 'Scheduler tick completed' });
   } catch (err) {
     console.error('❌ [GET /api/cron] error:', err.stack || err.message);
     res.status(500).json({ error: err.message });

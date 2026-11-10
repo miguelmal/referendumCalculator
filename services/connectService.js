@@ -14,6 +14,9 @@
 
 const crypto = require('crypto');
 const db = require('./databaseService');
+const parser = require('./docusignParser');
+const emailService = require('./emailService');
+const scheduler = require('./schedulerService');
 
 /**
  * Verifica la firma HMAC de un POST de Connect.
@@ -80,8 +83,102 @@ function extractMetadata(parsed) {
 }
 
 /**
+ * Procesa el `envelopeSummary` de un evento de DocuSign Connect para actualizar
+ * el sobre normalizado y los conteos de votos en la base de datos.
+ */
+async function processConnectEnvelope(parsed, meta) {
+  if (!parsed || typeof parsed !== 'object' || !meta.envelopeId) return null;
+
+  const data = parsed.data || {};
+  const summary = data.envelopeSummary || parsed.envelopeSummary || data || parsed;
+  const recipients = summary.recipients || data.recipients || parsed.recipients || null;
+  if (!recipients || !parser.hasCheckboxes(recipients)) {
+    return null;
+  }
+
+  const envelopeMeta = {
+    envelopeId: meta.envelopeId,
+    emailSubject: summary.emailSubject || parsed.emailSubject || '',
+    status: meta.status || summary.status || 'sent',
+    createdDateTime: summary.createdDateTime || parsed.createdDateTime || new Date().toISOString(),
+    statusChangedDateTime: summary.statusChangedDateTime || new Date().toISOString(),
+    expireDateTime: summary.expireDateTime || null,
+    expireAfter: summary.expireAfter || null,
+  };
+
+  const documents = {
+    envelopeDocuments: summary.envelopeDocuments || data.envelopeDocuments || [],
+  };
+
+  const docGenFormFields = summary.docGenFormFields
+    ? { docGenFormFields: summary.docGenFormFields }
+    : null;
+
+  const normalized = parser.buildNormalizedEnvelope(
+    envelopeMeta,
+    recipients,
+    documents,
+    docGenFormFields
+  );
+
+  // Preserve historical vote data when an envelope is voided
+  if (normalized.status === 'voided') {
+    const existingEnv = await db.getEnvelope(normalized.envelopeId);
+    if (existingEnv) {
+      Object.assign(normalized, {
+        totals: existingEnv.totals,
+        recipients: existingEnv.recipients,
+        availableChoices: existingEnv.availableChoices,
+        templateFields: existingEnv.templateFields,
+        totalVoters: existingEnv.totalVoters,
+        votedCount: existingEnv.votedCount,
+        noVoteCount: existingEnv.noVoteCount,
+        quorumThreshold: existingEnv.quorumThreshold,
+        hasQuorum: existingEnv.hasQuorum,
+      });
+    }
+  }
+
+  // Send vote report if transitioning to 'completed'
+  if (normalized.status === 'completed') {
+    const existingEnv = await db.getEnvelope(normalized.envelopeId);
+    const wasCompleted = existingEnv && existingEnv.status === 'completed';
+    if (!wasCompleted) {
+      console.log(`🎉 [Connect] Envelope ${normalized.envelopeId} completed — sending report...`);
+      try {
+        await emailService.sendVoteReport(normalized, 'completed');
+      } catch (err) {
+        console.error(`Email failed for completed ${normalized.envelopeId}:`, err.message);
+      }
+    }
+  }
+
+  await db.saveEnvelope(normalized.envelopeId, normalized);
+
+  if (
+    normalized.templateType === 'Presentacion de Casos' &&
+    (normalized.status === 'sent' || normalized.status === 'delivered') &&
+    normalized.expiresAt
+  ) {
+    await db.addActivePresentacion(normalized.envelopeId);
+    if (normalized.hasQuorum) {
+      console.log(`🗳️  [Connect] Envelope ${normalized.envelopeId} reached quorum — closing locally.`);
+      try {
+        await scheduler.closeEnvelope(normalized, 'quorum');
+      } catch (err) {
+        console.error(`Quorum close failed for ${normalized.envelopeId}:`, err.message);
+      }
+    }
+  } else {
+    await db.removeActivePresentacion(normalized.envelopeId);
+  }
+
+  return normalized;
+}
+
+/**
  * Procesa un POST entrante de Connect: verifica HMAC (si aplica), normaliza
- * metadata mínima y guarda el evento crudo en storage.
+ * metadata mínima, guarda el evento crudo y actualiza el sobre en storage.
  *
  * @param {object} args
  * @param {Buffer|string} args.rawBody - Cuerpo exacto recibido.
@@ -127,6 +224,12 @@ async function handleConnectEvent({ rawBody, headers = {} }) {
     `📥 Connect event almacenado: id=${record.id} event=${record.event || 'n/a'} ` +
     `envelope=${record.envelopeId || 'n/a'} status=${record.status || 'n/a'} verified=${verified}`
   );
+
+  try {
+    await processConnectEnvelope(parsed, meta);
+  } catch (err) {
+    console.error(`⚠️  [Connect] Error procesando sobre ${meta.envelopeId || 'n/a'}:`, err.message);
+  }
 
   return { stored: true, verified, record };
 }

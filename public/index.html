@@ -84,13 +84,20 @@
       <div class="modal-body">
         <!-- Template Settings Form -->
         <section class="admin-section">
-          <h3>Gestión y Configuración de Plantillas (Redis)</h3>
+          <h3>Gestión y Configuración de Plantillas</h3>
           <div id="existing-templates" style="margin-bottom: 1.5rem; font-size: 0.9rem;">
             <!-- Templates injected here -->
           </div>
 
           <form id="template-config-form" style="display:none; border-top: 1px solid var(--border); padding-top: 16px;">
             <input type="hidden" id="templateId" name="templateId">
+            <div class="form-group">
+              <label for="trackTemplate">¿Rastrear esta plantilla para votaciones? (Sí / No)</label>
+              <select id="trackTemplate" name="trackTemplate" class="search-input" style="cursor:pointer;">
+                <option value="true">Sí — Rastrear para votaciones</option>
+                <option value="false">No — No rastrear esta plantilla</option>
+              </select>
+            </div>
             <div class="form-group">
               <label for="templateName">Nombre de la Plantilla</label>
               <input type="text" id="templateName" name="templateName" class="search-input" required>
@@ -104,7 +111,7 @@
               <input type="text" id="contentField" name="contentField" class="search-input" required>
             </div>
             <div style="display:flex; gap:10px; align-items:center;">
-              <button type="submit" class="btn btn-refresh" id="btn-save-template-config">💾 Guardar en Redis</button>
+              <button type="submit" class="btn btn-refresh" id="btn-save-template-config">💾 Guardar Configuración</button>
               <button type="button" class="btn" id="btn-cancel-template-config">Cancelar</button>
             </div>
           </form>

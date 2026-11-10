@@ -3,7 +3,6 @@ const express = require('express');
 require('dotenv').config();
 
 const scheduler    = require('./services/schedulerService');
-const { refreshCache } = require('./services/syncService');
 const db           = require('./services/databaseService');
 const apiRoutes    = require('./routes/api');
 const { webhookRouter: connectWebhook, adminRouter: connectAdmin } = require('./routes/connect');
@@ -91,24 +90,14 @@ async function boot() {
       console.warn('⚠️  APP_BASIC_AUTH_PASSWORD not set — dashboard is publicly accessible');
     }
 
-    console.log('🗄️  Connecting to Redis...');
+    console.log('🗄️  Connecting to database...');
     await db.connect();
 
-    console.log('🔄 Populating cache from DocuSign...');
-    await refreshCache();
-    console.log('✅ Cache populated.');
-
-    // Refresh cache every 15 minutes
-    setInterval(() => {
-      console.log('🔄 Scheduled sync every 15 minutes...');
-      refreshCache().catch(err => console.error('❌ Scheduled sync error:', err));
-    }, 15 * 60 * 1000);
+    console.log('📡 Ready — envelopes are updated exclusively via DocuSign Connect webhooks (/connect).');
 
     scheduler.start();
   } catch (err) {
-    console.error('❌ Startup error (cache not populated):', err);
-    console.error('   The dashboard will serve from an empty cache until /api/refresh succeeds.');
-    // Still start the scheduler so it can retry once data is available
+    console.error('❌ Startup error:', err);
     scheduler.start();
   }
 

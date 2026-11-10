@@ -35,8 +35,6 @@ document.addEventListener('DOMContentLoaded', () => {
 
 // ─── Data Fetching ─────────────────────────────────────────────────────────
 
-let initialAutoSyncAttempted = false;
-
 async function fetchData() {
   showContainerLoading();
   try {
@@ -53,26 +51,10 @@ async function fetchData() {
       throw new Error(`GET /api/votes → HTTP ${resp.status} ${resp.statusText}${errBody ? ` (${errBody.slice(0, 120)})` : ''}`);
     }
 
-    const { envelopes = [], overallTotals = {}, environment = 'DEV', diagnostics, syncStatus } = await resp.json();
-    console.log('✅ [Client] /api/votes loaded:', { count: envelopes.length, environment, diagnostics, syncStatus });
-
-    // If cache is empty on first load, trigger a one-time sync from DocuSign automatically
-    if (envelopes.length === 0 && !initialAutoSyncAttempted) {
-      initialAutoSyncAttempted = true;
-      console.log('🔄 [Client] Cache is empty on initial load — triggering POST /api/refresh...');
-      const syncResp = await fetch('/api/refresh', { method: 'POST' });
-      if (!syncResp.ok) {
-        const errData = await syncResp.json().catch(() => ({}));
-        throw new Error(errData.error || `POST /api/refresh → HTTP ${syncResp.status}`);
-      }
-      return await fetchData();
-    }
+    const { envelopes = [], overallTotals = {}, environment = 'DEV', diagnostics } = await resp.json();
+    console.log('✅ [Client] /api/votes loaded:', { count: envelopes.length, environment, diagnostics });
 
     allEnvelopes = envelopes;
-
-    if (syncStatus && syncStatus.lastSyncError) {
-      console.warn('⚠️ [Client] Last DocuSign sync reported error:', syncStatus.lastSyncError);
-    }
 
     const titleEl = document.querySelector('.header-title');
     if (titleEl) {
@@ -256,6 +238,9 @@ function bindSearch() {
 
 // ─── Admin Modal & Templates ───────────────────────────────────────────────
 
+let adminActiveTab = 'valid'; // 'valid' | 'invalid'
+let lastAdminTemplatesPayload = null;
+
 function bindAdmin() {
   const btnAdmin  = document.getElementById('btn-admin');
   const btnClose  = document.getElementById('btn-close-admin');
@@ -289,6 +274,7 @@ function bindAdmin() {
     form.addEventListener('submit', async (e) => {
       e.preventDefault();
       const templateId = document.getElementById('templateId').value;
+      const enabled = document.getElementById('trackTemplate').value === 'true';
       const templateName = document.getElementById('templateName').value.trim();
       const voteOptions = document.getElementById('voteOptions').value.trim();
       const contentField = document.getElementById('contentField').value.trim();
@@ -308,12 +294,12 @@ function bindAdmin() {
         const resp = await fetch(`/api/templates/${encodeURIComponent(templateId)}/config`, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ templateName, voteOptions, contentField, enabled: true }),
+          body: JSON.stringify({ templateName, voteOptions, contentField, enabled }),
         });
         const data = await resp.json();
         if (!resp.ok) throw new Error(data.error || `HTTP ${resp.status}`);
 
-        showToast('✅ Configuración de plantilla guardada en Redis.', 'success');
+        showToast(`✅ Configuración guardada (${enabled ? 'Rastrear: Sí' : 'Rastrear: No'}).`, 'success');
         form.style.display = 'none';
         renderAdminTemplates(data);
       } catch (err) {
@@ -321,7 +307,7 @@ function bindAdmin() {
       } finally {
         if (saveBtn) {
           saveBtn.disabled = false;
-          saveBtn.textContent = '💾 Guardar en Redis';
+          saveBtn.textContent = '💾 Guardar Configuración';
         }
       }
     });
@@ -335,7 +321,7 @@ async function loadAdminTemplates() {
   container.innerHTML = `
     <div style="display:flex;align-items:center;gap:10px;padding:12px 0;color:var(--text-muted);">
       <span class="spinner" style="width:16px;height:16px;"></span>
-      Cargando plantillas desde Redis…
+      Cargando plantillas…
     </div>`;
 
   try {
@@ -425,8 +411,11 @@ function buildTemplateControlBadges(t) {
     );
   }
   if (t.config && t.config.updatedAt) {
+    const isTracked = t.config.enabled !== false;
     badges.push(
-      `<span class="badge" style="background:#eff6ff;color:#1e40af;border:1px solid #bfdbfe;">⚙️ Configurada</span>`
+      isTracked
+        ? `<span class="badge" style="background:#dcfce7;color:#166534;border:1px solid #86efac;">🟢 Rastrear: Sí</span>`
+        : `<span class="badge" style="background:#f1f5f9;color:#475569;border:1px solid #cbd5e1;">⚪ Rastrear: No</span>`
     );
   }
   return badges.join(' ');
@@ -441,6 +430,9 @@ function buildTemplateRowHtml(t, isValidSection) {
   const effectiveContentField = (t.config && t.config.contentField)
     ? t.config.contentField
     : ((t.textFields && t.textFields[0]) || 'Asuntos a Aprobar');
+  const effectiveEnabled = (t.config && t.config.enabled !== undefined)
+    ? String(t.config.enabled)
+    : 'true';
 
   const radioDetailHtml = (t.radioGroups || []).map(rg =>
     `<div style="font-size:0.78rem;color:var(--text-muted);margin-top:2px;">
@@ -477,7 +469,8 @@ function buildTemplateRowHtml(t, isValidSection) {
             data-template-name="${escapeHtml((t.config && t.config.templateName) || t.name)}"
             data-vote-options="${escapeHtml(effectiveOpts.join(', '))}"
             data-content-field="${escapeHtml(effectiveContentField)}"
-            title="Configurar opciones y campo de contenido">
+            data-enabled="${escapeHtml(effectiveEnabled)}"
+            title="Configurar seguimiento, opciones y campo de contenido">
             ⚙️ Configurar
           </button>
         ` : ''}
@@ -491,7 +484,11 @@ function buildTemplateRowHtml(t, isValidSection) {
     </li>`;
 }
 
-function renderAdminTemplates({ validTemplates = [], invalidTemplates = [], syncMeta = {}, docusignError = null }) {
+function renderAdminTemplates(payload) {
+  if (payload) lastAdminTemplatesPayload = payload;
+  const { validTemplates = [], invalidTemplates = [], syncMeta = {}, docusignError = null } =
+    lastAdminTemplatesPayload || {};
+
   const container = document.getElementById('existing-templates');
   if (!container) return;
 
@@ -503,10 +500,10 @@ function renderAdminTemplates({ validTemplates = [], invalidTemplates = [], sync
     : 'Inicio';
 
   let html = `
-    <div style="display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:10px;background:var(--surface-2);padding:10px 14px;border-radius:8px;border:1px solid var(--border);margin-bottom:16px;">
+    <div style="display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:10px;background:var(--surface-2);padding:10px 14px;border-radius:8px;border:1px solid var(--border);margin-bottom:14px;">
       <div style="font-size:0.8rem;color:var(--text-muted);">
         <div>🕒 Última sincronización: <strong>${escapeHtml(lastSyncStr)}</strong></div>
-        <div>📅 Cursor fecha creación (<code>from_date</code>): <strong>${escapeHtml(watermarkStr)}</strong></div>
+        <div>📅 Cursor fecha creación: <strong>${escapeHtml(watermarkStr)}</strong></div>
       </div>
       <div style="display:flex;gap:8px;">
         <button type="button" class="btn btn-refresh" id="btn-sync-templates-inc" style="padding:6px 12px;font-size:0.8rem;" title="Busca en DocuSign solo plantillas creadas después de ${escapeHtml(watermarkStr)}">
@@ -525,37 +522,48 @@ function renderAdminTemplates({ validTemplates = [], invalidTemplates = [], sync
       </div>`;
   }
 
-  // 1. Valid Voting Templates (have Radio Buttons or Checkboxes)
+  // Tabs bar inside Admin modal
   html += `
-    <h4 style="font-size:0.85rem;text-transform:uppercase;color:#065f46;margin:0 0 8px 0;letter-spacing:0.04em;">
-      ✅ Plantillas Válidas para Votación — Con Radio Buttons / Checkboxes (${validTemplates.length})
-    </h4>`;
+    <div class="tab-nav" style="padding:0;margin-bottom:14px;border-bottom:1px solid var(--border);background:transparent;">
+      <button type="button" class="tab-btn ${adminActiveTab === 'valid' ? 'active' : ''}" data-admin-tab="valid">
+        ✅ Válidas para Votación (${validTemplates.length})
+      </button>
+      <button type="button" class="tab-btn ${adminActiveTab === 'invalid' ? 'active' : ''}" data-admin-tab="invalid">
+        🚫 Sin Opciones de Voto (${invalidTemplates.length})
+      </button>
+    </div>`;
 
-  if (validTemplates.length === 0) {
-    html += `<p style="color:var(--text-muted);font-size:0.85rem;margin-bottom:16px;">No hay plantillas con Radio Buttons ni Checkboxes almacenadas.</p>`;
-  } else {
-    html += `<ul class="recipients-list" style="margin-bottom:18px;">`;
-    for (const t of validTemplates) {
-      html += buildTemplateRowHtml(t, true);
+  if (adminActiveTab === 'valid') {
+    if (validTemplates.length === 0) {
+      html += `<p style="color:var(--text-muted);font-size:0.85rem;margin-bottom:16px;">No hay plantillas con Radio Buttons ni Checkboxes almacenadas.</p>`;
+    } else {
+      html += `<ul class="recipients-list" style="margin-bottom:12px;">`;
+      for (const t of validTemplates) {
+        html += buildTemplateRowHtml(t, true);
+      }
+      html += `</ul>`;
     }
-    html += `</ul>`;
+  } else {
+    if (invalidTemplates.length === 0) {
+      html += `<p style="color:var(--text-muted);font-size:0.85rem;margin-bottom:16px;">Ninguna plantilla sin opciones de voto.</p>`;
+    } else {
+      html += `<ul class="recipients-list" style="margin-bottom:12px;">`;
+      for (const t of invalidTemplates) {
+        html += buildTemplateRowHtml(t, false);
+      }
+      html += `</ul>`;
+    }
   }
 
-  // 2. Invalid / Non-Voting Templates (stored in Redis, separated view)
-  html += `
-    <details style="margin-top:12px;border:1px solid var(--border);border-radius:8px;padding:10px 14px;background:var(--surface-2);">
-      <summary style="cursor:pointer;font-size:0.85rem;font-weight:600;color:var(--text-muted);user-select:none;">
-        🚫 Plantillas sin Opciones de Voto (${invalidTemplates.length}) — Guardadas en caché (clic para ver/actualizar)
-      </summary>
-      <div style="margin-top:10px;">
-        ${invalidTemplates.length === 0
-          ? `<p style="color:var(--text-muted);font-size:0.82rem;margin:0;">Ninguna plantilla descartada.</p>`
-          : `<ul class="recipients-list">${invalidTemplates.map(t => buildTemplateRowHtml(t, false)).join('')}</ul>`
-        }
-      </div>
-    </details>`;
-
   container.innerHTML = html;
+
+  // Bind Admin tabs
+  container.querySelectorAll('button[data-admin-tab]').forEach(tabBtn => {
+    tabBtn.addEventListener('click', () => {
+      adminActiveTab = tabBtn.dataset.adminTab;
+      renderAdminTemplates();
+    });
+  });
 
   // Bind incremental & full sync buttons
   const btnInc  = document.getElementById('btn-sync-templates-inc');
@@ -570,7 +578,8 @@ function renderAdminTemplates({ validTemplates = [], invalidTemplates = [], sync
         btn.dataset.templateId,
         btn.dataset.templateName,
         btn.dataset.voteOptions,
-        btn.dataset.contentField
+        btn.dataset.contentField,
+        btn.dataset.enabled
       );
     });
   });
@@ -582,11 +591,12 @@ function renderAdminTemplates({ validTemplates = [], invalidTemplates = [], sync
   });
 }
 
-function selectTemplateInAdminForm(templateId, name, voteOptionsCsv, contentField) {
+function selectTemplateInAdminForm(templateId, name, voteOptionsCsv, contentField, enabled = 'true') {
   const form = document.getElementById('template-config-form');
   if (!form) return;
   form.style.display = 'block';
   document.getElementById('templateId').value = templateId || '';
+  document.getElementById('trackTemplate').value = String(enabled) === 'false' ? 'false' : 'true';
   document.getElementById('templateName').value = name || '';
   document.getElementById('voteOptions').value = voteOptionsCsv || '';
   document.getElementById('contentField').value = contentField || 'Asuntos a Aprobar';
@@ -600,34 +610,13 @@ function bindRefresh() {
     const btn = document.getElementById('btn-refresh');
     btn.disabled = true;
     btn.innerHTML = '<span class="spinner" style="width:14px;height:14px;display:inline-block;vertical-align:middle;margin-right:6px;border-width:2px;border-top-color:#fff;"></span> Actualizando…';
-    
-    // Dim the main container elegantly
-    const container = document.getElementById('agreements-container');
-    container.style.transition = 'opacity 0.4s ease';
-    container.style.opacity = '0.5';
 
     try {
-      console.log('📡 [Client] Triggering POST /api/refresh...');
-      const resp = await fetch('/api/refresh', { method: 'POST' });
-      if (!resp.ok) {
-        const errBody = await resp.text().catch(() => '');
-        console.error('❌ [Client] /api/refresh failed:', {
-          url: resp.url,
-          status: resp.status,
-          statusText: resp.statusText,
-          body: errBody,
-        });
-        throw new Error(`POST /api/refresh → HTTP ${resp.status} ${resp.statusText}${errBody ? ` (${errBody.slice(0, 120)})` : ''}`);
-      }
-      showToast('✅ Datos actualizados. Recargando...', 'success');
-      
-      // Wait a moment so the user reads the toast, then reload elegantly
-      setTimeout(() => {
-        window.location.reload();
-      }, 1200);
+      await fetchData();
+      showToast('✅ Vista actualizada.', 'success');
     } catch (err) {
       showToast(`❌ Error al actualizar: ${err.message}`, 'error');
-      container.style.opacity = '1';
+    } finally {
       btn.disabled = false;
       btn.innerHTML = '<span class="btn-icon">↻</span> Actualizar';
     }
