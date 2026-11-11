@@ -2,8 +2,7 @@ const express = require('express');
 const db           = require('../services/databaseService');
 const scheduler    = require('../services/schedulerService');
 const emailService = require('../services/emailService');
-const docusign     = require('../services/docusignService');
-const config       = require('../config');
+const parser       = require('../services/docusignParser');
 const {
   syncTemplates,
   refreshSingleTemplate,
@@ -11,13 +10,30 @@ const {
 
 const router = express.Router();
 
-/** GET /votes — serve all envelopes stored from Connect webhooks */
+/** GET /votes — serve all tracked envelopes stored from Connect webhooks */
 router.get('/votes', async (req, res) => {
   try {
-    // Check and close any expired Presentacion de Casos before reading envelopes
-    await scheduler._tick();
+    const [rawEnvelopes, storedTemplates] = await Promise.all([
+      db.getAllEnvelopes(),
+      db.getAllTemplates().catch(() => []),
+    ]);
 
-    const envelopes = await db.getAllEnvelopes();
+    // Filter out envelopes belonging to templates configured with enabled: false ("No rastrear")
+    const envelopes = rawEnvelopes.filter(env => {
+      if (env.trackingDisabled) return false;
+      const matched = parser.matchTemplateConfig(env, {}, storedTemplates);
+      if (matched && matched.config && matched.config.enabled === false) {
+        return false;
+      }
+      if (matched && matched.config) {
+        if (matched.config.templateName) env.templateType = matched.config.templateName;
+        if (Array.isArray(matched.config.voteOptions) && matched.config.voteOptions.length > 0) {
+          const mergedChoices = new Set([...matched.config.voteOptions, ...(env.availableChoices || [])]);
+          env.availableChoices = Array.from(mergedChoices);
+        }
+      }
+      return true;
+    });
 
     const overallTotals = {};
     for (const env of envelopes) {
@@ -28,7 +44,7 @@ router.get('/votes', async (req, res) => {
 
     const envString = process.env.NODE_ENV === 'production' ? 'PROD' : 'DEV';
     console.log(
-      `📊 [GET /api/votes] Serving ${envelopes.length} envelopes (dbMode: ${db.getDiagnostics().mode})`
+      `📊 [GET /api/votes] Serving ${envelopes.length} tracked envelopes (dbMode: ${db.getDiagnostics().mode})`
     );
     res.json({
       envelopes,
@@ -42,35 +58,11 @@ router.get('/votes', async (req, res) => {
   }
 });
 
-/** POST /refresh — re-check expired envelopes and reload stored state (no envelope polling) */
-router.post('/refresh', async (req, res) => {
-  try {
-    await scheduler._tick();
-    res.json({ success: true, message: 'Stored envelopes reloaded' });
-  } catch (err) {
-    console.error('❌ [POST /api/refresh] error:', err.stack || err.message);
-    res.status(500).json({ error: err.message });
-  }
-});
-
-/** GET /cron — Vercel Cron endpoint to process expired envelopes (no envelope polling) */
-router.get('/cron', async (req, res) => {
-  try {
-    console.log('⏰ [GET /api/cron] Scheduler tick triggered...');
-    await scheduler._tick();
-    console.log('✅ [GET /api/cron] Scheduler tick completed');
-    res.json({ success: true, message: 'Scheduler tick completed' });
-  } catch (err) {
-    console.error('❌ [GET /api/cron] error:', err.stack || err.message);
-    res.status(500).json({ error: err.message });
-  }
-});
-
 /** POST /report/:envelopeId — manually resend vote result email */
 router.post('/report/:envelopeId', async (req, res) => {
   try {
     const envelope = await db.getEnvelope(req.params.envelopeId);
-    if (!envelope) return res.status(404).json({ error: 'Envelope not found in cache' });
+    if (!envelope) return res.status(404).json({ error: 'Envelope not found' });
 
     await emailService.sendVoteReport(envelope);
     res.json({ success: true, message: 'Report email sent' });
@@ -80,16 +72,13 @@ router.post('/report/:envelopeId', async (req, res) => {
   }
 });
 
-/** POST /close/:envelopeId — manual "Close Now" for Presentacion de Casos */
+/** POST /close/:envelopeId — manual "Close Now" for open voting envelopes */
 router.post('/close/:envelopeId', async (req, res) => {
   try {
     const envelope = await db.getEnvelope(req.params.envelopeId);
-    if (!envelope) return res.status(404).json({ error: 'Envelope not found in cache' });
+    if (!envelope) return res.status(404).json({ error: 'Envelope not found' });
 
-    if (envelope.templateType !== 'Presentacion de Casos') {
-      return res.status(400).json({ error: 'Close Now is only available for Presentacion de Casos envelopes' });
-    }
-    if (envelope.status === 'closed') {
+    if (envelope.status === 'closed' || envelope.status === 'completed') {
       return res.status(400).json({ error: 'Envelope is already closed' });
     }
     if (envelope.status === 'voided') {
@@ -105,7 +94,7 @@ router.post('/close/:envelopeId', async (req, res) => {
 });
 
 /**
- * Helper to load templates from Redis and partition into valid vs non-voting templates
+ * Helper to load templates from storage and partition into valid vs non-voting templates
  */
 async function buildTemplatesPayload() {
   const allTemplates = await db.getAllTemplates();
@@ -122,7 +111,7 @@ async function buildTemplatesPayload() {
   };
 }
 
-/** GET /templates — serve stored templates from Redis (initial sync only if never synced) */
+/** GET /templates — serve stored templates from storage (initial sync only if never synced) */
 router.get('/templates', async (req, res) => {
   try {
     let syncMeta = await db.getAllSyncMeta();
@@ -130,7 +119,7 @@ router.get('/templates', async (req, res) => {
     let docusignError = null;
 
     if (allTemplates.length === 0 && !syncMeta.templates_last_synced_at) {
-      console.log('📋 [GET /api/templates] No templates cached in Redis yet — performing initial sync...');
+      console.log('📋 [GET /api/templates] No templates cached in storage yet — performing initial sync...');
       try {
         await syncTemplates({ full: true });
       } catch (dsErr) {
@@ -167,7 +156,7 @@ router.post('/templates/sync', async (req, res) => {
   }
 });
 
-/** POST /templates/:templateId/refresh — refresh a single template from DocuSign and update Redis */
+/** POST /templates/:templateId/refresh — refresh a single template from DocuSign and update storage */
 router.post('/templates/:templateId/refresh', async (req, res) => {
   try {
     const template = await refreshSingleTemplate(req.params.templateId);
@@ -183,7 +172,7 @@ router.post('/templates/:templateId/refresh', async (req, res) => {
   }
 });
 
-/** POST /templates/:templateId/config — save admin config for a template in Redis */
+/** POST /templates/:templateId/config — save admin config for a template in storage */
 router.post('/templates/:templateId/config', async (req, res) => {
   try {
     const { templateName, voteOptions, contentField, enabled = true } = req.body || {};

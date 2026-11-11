@@ -25,36 +25,7 @@
       "response": []
     },
     {
-      "name": "2. List Envelopes",
-      "request": {
-        "method": "GET",
-        "header": [],
-        "url": {
-          "raw": "{{baseUrl}}/accounts/{{accountId}}/envelopes?from_date={{fromDate}}&status=any",
-          "host": [
-            "{{baseUrl}}"
-          ],
-          "path": [
-            "accounts",
-            "{{accountId}}",
-            "envelopes"
-          ],
-          "query": [
-            {
-              "key": "from_date",
-              "value": "{{fromDate}}"
-            },
-            {
-              "key": "status",
-              "value": "any"
-            }
-          ]
-        }
-      },
-      "response": []
-    },
-    {
-      "name": "3. Get Envelope Recipients & Tabs",
+      "name": "2. Get Envelope Recipients & Tabs",
       "request": {
         "method": "GET",
         "header": [],
@@ -81,7 +52,7 @@
       "response": []
     },
     {
-      "name": "4. Get docGenFormFields",
+      "name": "3. Get docGenFormFields",
       "request": {
         "method": "GET",
         "header": [],
@@ -103,7 +74,7 @@
       "response": []
     },
     {
-      "name": "5. Get Envelope Documents",
+      "name": "4. Get Envelope Documents",
       "request": {
         "method": "GET",
         "header": [],
@@ -124,7 +95,7 @@
       "response": []
     },
     {
-      "name": "6. Void Envelope",
+      "name": "5. Void Envelope",
       "request": {
         "method": "PUT",
         "header": [

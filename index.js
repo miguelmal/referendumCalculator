@@ -5,11 +5,16 @@ require('dotenv').config();
 const scheduler    = require('./services/schedulerService');
 const db           = require('./services/databaseService');
 const apiRoutes    = require('./routes/api');
+const { authRouter } = require('./routes/auth');
 const { webhookRouter: connectWebhook, adminRouter: connectAdmin } = require('./routes/connect');
-const { basicAuthMiddleware } = require('./middleware/basicAuth');
+const { ssoAuthMiddleware } = require('./middleware/ssoAuth');
+const config       = require('./config');
 
 const app  = express();
 const PORT = process.env.PORT || 3000;
+
+// Behind a reverse proxy / platform edge: honour X-Forwarded-* so req.secure and cookies work.
+app.set('trust proxy', true);
 
 // ── Request / Response Logger ────────────────────────────────────────────────
 app.use((req, res, next) => {
@@ -27,13 +32,13 @@ app.use((req, res, next) => {
 });
 
 // ── DocuSign Connect webhook ─────────────────────────────────────────────────
-// Se monta ANTES de express.json() y del Basic Auth: DocuSign no envía nuestras
+// Se monta ANTES de express.json() y del gate SSO: DocuSign no envía nuestras
 // credenciales y el HMAC requiere el cuerpo crudo (el router usa express.raw).
 app.use('/connect', connectWebhook);
 
 app.use(express.json());
 
-// Load-balancer / compose / Vercel health check & diagnostics (unauthenticated)
+// Health check & diagnostics (unauthenticated)
 app.get('/health', async (_req, res) => {
   try {
     await db.connect();
@@ -52,12 +57,15 @@ app.get('/health', async (_req, res) => {
   }
 });
 
-// Temporary shared password for dashboard + API (skip if APP_BASIC_AUTH_PASSWORD unset)
-app.use(basicAuthMiddleware);
-
+// DocuSign OAuth 2.0 SSO routes & static UI assets
+app.use('/auth', authRouter);
 app.use(express.static(path.join(__dirname, 'public')));
+
+// SSO gate (portal users) for the dashboard API and Connect admin endpoints
+app.use(ssoAuthMiddleware);
+
 app.use('/api', apiRoutes);
-// Inspección de eventos Connect (detrás del Basic Auth)
+// Inspección de eventos Connect (detrás de autenticación)
 app.use('/connect', connectAdmin);
 
 // ── Catch-all 404 & Error Handlers ───────────────────────────────────────────
@@ -81,33 +89,38 @@ app.use((err, req, res, _next) => {
 // ─── Boot ──────────────────────────────────────────────────────────────────
 
 async function boot() {
-  try {
-    console.log('⚙️  Booting DocuSign Vote Counter...');
+  console.log('⚙️  Booting DocuSign Vote Counter...');
 
-    if (process.env.APP_BASIC_AUTH_PASSWORD) {
-      console.log(`🔒 Basic auth enabled (user: ${process.env.APP_BASIC_AUTH_USER || 'admin'})`);
-    } else {
-      console.warn('⚠️  APP_BASIC_AUTH_PASSWORD not set — dashboard is publicly accessible');
+  if (config.auth.ssoEnabled) {
+    if (!config.auth.sessionSecret) {
+      throw new Error('SSO is enabled but neither SESSION_SECRET nor DOCUSIGN_SECRET_KEY is set.');
     }
+    console.log('🔑 DocuSign OAuth 2.0 SSO enabled (portal)');
+  } else {
+    console.warn('⚠️  SSO is not configured — dashboard is publicly accessible');
+  }
 
+  try {
     console.log('🗄️  Connecting to database...');
     await db.connect();
-
-    console.log('📡 Ready — envelopes are updated exclusively via DocuSign Connect webhooks (/connect).');
-
-    scheduler.start();
   } catch (err) {
-    console.error('❌ Startup error:', err);
-    scheduler.start();
+    console.error('❌ Database connection error:', err);
   }
+
+  console.log('📡 Ready — envelopes are updated via DocuSign Connect webhooks (/connect).');
+  scheduler.start();
 
   app.listen(PORT, () => {
     console.log(`🚀 DocuSign Vote Counter running at http://localhost:${PORT}`);
   });
 }
 
-if (!process.env.VERCEL && require.main === module) {
-  boot();
+// When imported (e.g. by a serverless adapter) the app is exported without listening.
+if (require.main === module) {
+  boot().catch(err => {
+    console.error('❌ Fatal startup error:', err.message);
+    process.exit(1);
+  });
 }
 
 module.exports = app;

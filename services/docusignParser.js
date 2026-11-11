@@ -19,7 +19,7 @@ function getTemplateType(envelope, documents) {
   const subject = envelope.emailSubject || '';
   
   // Normalize strings to remove accents and make lowercase
-  const normalize = (str) => str.normalize("NFD").replace(/[\u0300-\u036f]/g, "").toLowerCase();
+  const normalize = (str) => String(str || '').normalize("NFD").replace(/[\u0300-\u036f]/g, "").toLowerCase();
   
   const lowerDoc = normalize(docName);
   const lowerSub = normalize(subject);
@@ -33,6 +33,53 @@ function getTemplateType(envelope, documents) {
     return 'Presentacion de Casos';
   }
   return 'Board Referendum';
+}
+
+/**
+ * Matches an envelope to a stored template from Admin configuration.
+ * @param {object} envelope
+ * @param {object} documents
+ * @param {Array<object>} storedTemplates
+ * @returns {object|null}
+ */
+function matchTemplateConfig(envelope = {}, documents = {}, storedTemplates = []) {
+  if (!Array.isArray(storedTemplates) || storedTemplates.length === 0) return null;
+
+  const normalize = (str) =>
+    String(str || '')
+      .normalize('NFD')
+      .replace(/[\u0300-\u036f]/g, '')
+      .toLowerCase()
+      .trim();
+
+  // 1. Direct templateId match if present
+  if (envelope.templateId) {
+    const byId = storedTemplates.find(t => t.templateId === envelope.templateId);
+    if (byId) return byId;
+  }
+
+  const docs = (documents && documents.envelopeDocuments) || [];
+  const contentDoc = docs.find(d => d.type === 'content');
+  const docName = normalize((contentDoc && contentDoc.name) || '');
+  const subject = normalize(envelope.emailSubject || envelope.subject || '');
+  const inferredType = normalize(getTemplateType(envelope, documents));
+
+  // 2. Match by configured templateName or DocuSign template name
+  for (const t of storedTemplates) {
+    const cfgName = normalize(t.config && t.config.templateName);
+    const rawName = normalize(t.name);
+    for (const candidate of [cfgName, rawName].filter(Boolean)) {
+      if (
+        (docName && (docName.includes(candidate) || candidate.includes(docName.replace(/\.pdf$/i, '')))) ||
+        (subject && subject.includes(candidate)) ||
+        candidate === inferredType
+      ) {
+        return t;
+      }
+    }
+  }
+
+  return null;
 }
 
 // ─── Tab Extraction Helpers ────────────────────────────────────────────────
@@ -183,15 +230,18 @@ function parseExpiresAt(docGenMap, envelope) {
  * @param {object} templateConfig - The template configurations from DB.
  * @returns {string}
  */
-function parseContentText(docGenMap, flatTabs, envelope) {
-  const fieldName = 'Asuntos a Aprobar';
-  
-  let val = findDocGenValue(docGenMap, fieldName);
-  if (!val) {
-    val = findTabValue(flatTabs, fieldName);
+function parseContentText(docGenMap, flatTabs, envelope, configuredContentField = null) {
+  const candidateFields = [
+    configuredContentField,
+    'Asuntos a Aprobar',
+    'Resumen',
+    'Asunto',
+  ].filter(Boolean);
+
+  for (const fieldName of candidateFields) {
+    const val = findDocGenValue(docGenMap, fieldName) || findTabValue(flatTabs, fieldName);
+    if (val) return val;
   }
-  
-  if (val) return val;
 
   // Fallback: clean the email subject
   const subject = envelope.emailSubject || '';
@@ -338,7 +388,7 @@ function hasCheckboxes(recipients) {
 
 /**
  * Converts raw DocuSign API data into a normalized envelope object
- * suitable for storage in Redis.
+ * suitable for storage.
  *
  * @param {object} envelope - Raw envelope from listEnvelopes
  * @param {object} recipients - From getEnvelopeRecipientsWithTabs
@@ -347,8 +397,16 @@ function hasCheckboxes(recipients) {
  * @param {object} templateConfig - The template configurations from DB.
  * @returns {object} Normalized envelope object
  */
-function buildNormalizedEnvelope(envelope, recipients, documents, docGenFormFields) {
-  const templateType = getTemplateType(envelope, documents);
+function buildNormalizedEnvelope(envelope, recipients, documents, docGenFormFields, storedTemplates = []) {
+  const matchedTemplate = matchTemplateConfig(envelope, documents, storedTemplates);
+  const templateConfig = (matchedTemplate && matchedTemplate.config) || null;
+  const trackingDisabled = Boolean(templateConfig && templateConfig.enabled === false);
+
+  const templateType =
+    (templateConfig && templateConfig.templateName) ||
+    (matchedTemplate && matchedTemplate.name) ||
+    getTemplateType(envelope, documents);
+
   const docGenMap = parseDocGenFields(docGenFormFields);
 
   // Build per-signer vote data
@@ -358,7 +416,9 @@ function buildNormalizedEnvelope(envelope, recipients, documents, docGenFormFiel
   ];
 
   const totals = {};
-  const availableChoices = new Set();
+  const availableChoices = new Set(
+    (templateConfig && Array.isArray(templateConfig.voteOptions) ? templateConfig.voteOptions : [])
+  );
   const recipientsList = [];
 
   // No-vote category label (voters who are eligible but have not registered any choice).
@@ -429,16 +489,19 @@ function buildNormalizedEnvelope(envelope, recipients, documents, docGenFormFiel
   const hasQuorum = totalVoters > 0 && votedCount >= quorumThreshold;
 
   // Expiration and template-specific metadata (sourced from DocGen fields)
-  const horaFinalVoto = templateType === 'Presentacion de Casos'
-    ? parseHoraFinalVoto(docGenMap)
-    : null;
-
-  const expiresAt = templateType === 'Presentacion de Casos'
-    ? parseExpiresAt(docGenMap, envelope)
-    : null;
+  const horaFinalVoto = parseHoraFinalVoto(docGenMap);
+  const expiresAt =
+    horaFinalVoto || templateType === 'Presentacion de Casos'
+      ? parseExpiresAt(docGenMap, envelope)
+      : null;
 
   const flatTabs = flattenAllRecipientTabs(recipients);
-  const contentText = parseContentText(docGenMap, flatTabs, envelope);
+  const contentText = parseContentText(
+    docGenMap,
+    flatTabs,
+    envelope,
+    templateConfig && templateConfig.contentField
+  );
 
   // Consolidate all fields for frontend viewing
   const allFields = { ...docGenMap };
@@ -450,6 +513,8 @@ function buildNormalizedEnvelope(envelope, recipients, documents, docGenFormFiel
 
   return {
     envelopeId: envelope.envelopeId,
+    templateId: (matchedTemplate && matchedTemplate.templateId) || envelope.templateId || null,
+    trackingDisabled,
     subject: envelope.emailSubject || '',
     status: envelope.status || 'sent',
     templateType,
@@ -474,6 +539,7 @@ function buildNormalizedEnvelope(envelope, recipients, documents, docGenFormFiel
 
 module.exports = {
   getTemplateType,
+  matchTemplateConfig,
   flattenAllRecipientTabs,
   findTabValue,
   parseDocGenFields,

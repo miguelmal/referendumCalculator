@@ -21,12 +21,16 @@
       </div>
     </div>
     <div class="header-right">
+      <span id="user-badge" style="display:none;font-size:0.82rem;color:#cbd5e1;margin-right:6px;"></span>
       <button class="btn" id="btn-admin" title="Configuraciones">
         <span class="btn-icon">⚙️</span> Admin
       </button>
-      <button class="btn btn-refresh" id="btn-refresh" title="Sincronizar con DocuSign">
+      <button class="btn btn-refresh" id="btn-refresh" title="Actualizar vista">
         <span class="btn-icon">↻</span> Actualizar
       </button>
+      <a class="btn" id="btn-logout" href="/auth/logout" style="display:none;text-decoration:none;" title="Cerrar sesión SSO">
+        🚪 Salir
+      </a>
     </div>
   </header>
 

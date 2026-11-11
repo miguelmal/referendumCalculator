@@ -10,28 +10,75 @@ let tabConfig = {};
 
 // ─── Boot ──────────────────────────────────────────────────────────────────
 
-document.addEventListener('DOMContentLoaded', () => {
+document.addEventListener('DOMContentLoaded', async () => {
   bindRefresh();
   bindSearch();
   bindAdmin();
-  fetchData();
 
-  // On serverless (Vercel), background timers don't stay alive when idle.
-  // Check every 60s while the dashboard is open for expired Presentaciones.
-  setInterval(() => {
-    const now = new Date();
-    const hasNewlyExpired = allEnvelopes.some(env =>
-      env.templateType === 'Presentacion de Casos' &&
-      (env.status === 'sent' || env.status === 'delivered') &&
-      env.expiresAt &&
-      now >= new Date(env.expiresAt)
-    );
-    if (hasNewlyExpired) {
-      console.log('⏰ [Client] Detected expired Presentación de Casos — triggering check...');
-      fetchData();
-    }
-  }, 60 * 1000);
+  const isAuth = await checkAuthStatus();
+  if (isAuth) {
+    fetchData();
+  }
 });
+
+// ─── SSO Authentication ────────────────────────────────────────────────────
+
+async function checkAuthStatus() {
+  const urlParams = new URLSearchParams(window.location.search);
+  const authError = urlParams.get('auth_error');
+  if (authError) {
+    showToast(`❌ Error de autenticación SSO: ${authError}`, 'error');
+    window.history.replaceState({}, document.title, window.location.pathname);
+  }
+
+  try {
+    const resp = await fetch('/auth/me', { cache: 'no-store' });
+    const data = await resp.json();
+
+    if (data.user && data.user.name) {
+      const userBadge = document.getElementById('user-badge');
+      const logoutBtn = document.getElementById('btn-logout');
+      if (userBadge) {
+        userBadge.textContent = `👤 ${data.user.name}`;
+        userBadge.style.display = 'inline-block';
+      }
+      if (logoutBtn) {
+        logoutBtn.style.display = 'inline-flex';
+      }
+    }
+
+    if (data.ssoEnabled && !data.authenticated) {
+      renderSsoLoginPrompt(data.loginUrl || '/auth/login', data.redirectUri, authError);
+      return false;
+    }
+    return true;
+  } catch (err) {
+    console.warn('⚠️ [Client] Could not check /auth/me:', err.message);
+    return true;
+  }
+}
+
+function renderSsoLoginPrompt(loginUrl, redirectUri, authError) {
+  document.getElementById('account-name-badge').textContent = 'Sesión requerida';
+  const container = document.getElementById('agreements-container');
+  container.innerHTML = `
+    <div class="loading-state" style="flex-direction:column;gap:16px;padding:48px 32px;">
+      <div style="font-size:2rem;">🔐</div>
+      <h3 style="margin:0;color:var(--navy);">Autenticación DocuSign (SSO)</h3>
+      <p style="margin:0;max-width:460px;color:var(--text-muted);font-size:0.9rem;">
+        Inicia sesión con tu cuenta corporativa de DocuSign para acceder al Dashboard de Votaciones y la configuración de plantillas.
+      </p>
+      ${authError ? `<div class="error-state" style="padding:10px 16px;border-radius:8px;font-size:0.85rem;">⚠️ ${escapeHtml(authError)}</div>` : ''}
+      <a href="${escapeHtml(loginUrl)}" class="btn btn-refresh" style="text-decoration:none;padding:10px 24px;font-size:0.95rem;">
+        🔑 Iniciar Sesión con DocuSign
+      </a>
+      ${redirectUri ? `
+        <div style="font-size:0.75rem;color:var(--text-muted);margin-top:8px;">
+          Redirect URI (DocuSign Admin &rarr; Apps and Keys): <code>${escapeHtml(redirectUri)}</code>
+        </div>
+      ` : ''}
+    </div>`;
+}
 
 // ─── Data Fetching ─────────────────────────────────────────────────────────
 
@@ -40,6 +87,13 @@ async function fetchData() {
   try {
     console.log('📡 [Client] Fetching /api/votes...');
     const resp = await fetch('/api/votes', { cache: 'no-store' });
+    if (resp.status === 401) {
+      const authData = await resp.json().catch(() => ({}));
+      if (authData.ssoEnabled) {
+        renderSsoLoginPrompt(authData.loginUrl || '/auth/login');
+        return;
+      }
+    }
     if (!resp.ok) {
       const errBody = await resp.text().catch(() => '');
       console.error('❌ [Client] /api/votes failed:', {
@@ -831,21 +885,6 @@ function buildRecipientRows(recipients, config) {
           ${signedDateHtml}
         </div>
         <span class="rec-vote ${voteClass}">${voteLabel}</span>
-      </li>`;
-  }).join('');
-}
-
-function buildTemplateFields(fields) {
-  const entries = Object.entries(fields);
-  if (entries.length === 0) {
-    return `<li style="color:var(--text-muted);font-size:0.85rem;padding:10px 0;">No se encontraron campos adicionales.</li>`;
-  }
-  
-  return entries.map(([key, value]) => {
-    return `
-      <li class="recipient-row" style="flex-direction: column; align-items: flex-start; gap: 4px;">
-        <span class="rec-role" style="font-size: 0.75rem; text-transform: uppercase;">${escapeHtml(key)}</span>
-        <span class="rec-name" style="font-size: 0.9rem; word-break: break-word;">${escapeHtml(value)}</span>
       </li>`;
   }).join('');
 }

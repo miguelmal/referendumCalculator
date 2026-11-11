@@ -1,23 +1,32 @@
 # DocuSign API Usage Description
 
-This document provides an overview of how our "Vote Counter & Form Data Aggregator" integrates with the DocuSign eSignature REST API. 
+The "Vote Counter" integrates with DocuSign for board referendums and case presentations. Votes are received through **DocuSign Connect** webhooks. The REST API is used only for template configuration, reading a single envelope's details, and voiding envelopes when the voting period ends.
 
-Our application acts as a background processor that monitors specific DocuSign templates (like Board Referendums and Case Presentations) to aggregate votes and manage the envelope lifecycle.
+## Authentication
 
-### Authentication
-We use the **JWT (JSON Web Token) Grant OAuth flow** for server-to-server authentication. The application authenticates as a system user, allowing it to perform background tasks without requiring active user consent flows.
+- **Server-to-server (REST API):** OAuth **JWT Grant**, signed with the integration's RSA private key (certificate), scopes `signature impersonation`. This is the only credential used for API calls.
+- **Portal sign-in:** OAuth 2.0 Authorization Code (SSO), scope `signature`. Used only to identify the person using the dashboard (`/oauth/userinfo`). The token is discarded and never used for API calls.
+- **Connect:** Each webhook is verified with HMAC-SHA256 (`X-DocuSign-Signature-1`).
 
-### Endpoints and Operations
+## Connect webhooks
 
-1. **Fetching Envelopes (`GET /restapi/v2.1/accounts/{accountId}/envelopes`)**
-   - **Purpose**: We periodically query the API to fetch a list of envelopes sent within a specific timeframe or matching certain criteria.
-   - **Usage**: This allows us to discover new voting envelopes that have been sent out to users.
+`POST /connect` receives envelope events. Each event is stored and triggers a re-read of that envelope, so vote totals are computed from DocuSign's current recipient tab data. When `floor(n/2) + 1` of the `n` eligible voters have voted, the envelope is closed and the report emailed.
 
-2. **Retrieving Form Data (`GET /restapi/v2.1/accounts/{accountId}/envelopes/{envelopeId}/form_data`)**
-   - **Purpose**: Once an envelope is identified, we pull the form data to read the custom fields filled out by the recipients.
-   - **Usage**: This is the core of our voting logic. We grab the checkboxes from the template and count them. We parse the form data to tally these choices (for example, counting checkboxes for *A Favor*, *No a Favor*, *Abstenido*) for each recipient.
+## REST endpoints used
 
-3. **Voiding Envelopes (`PUT /restapi/v2.1/accounts/{accountId}/envelopes/{envelopeId}`)**
-   - **Purpose**: Our system enforces strict voting deadlines.
-   - **Usage**: When a predefined expiration time is reached, our background scheduler makes a request to void the envelope in DocuSign. We pass a `voidedReason` such as "Voting period has expired." This prevents any late voting and officially closes the referendum. The expiration time is dynamically determined by reading the following custom form fields from the DocuSign template: `Fecha Limite para votar`, `Hora limite votar`, `Minutos Limite para votar`, and `Meridiem Limite para votar`.
+| Operation | Endpoint | Purpose |
+|-----------|----------|---------|
+| Token | `POST /oauth/token` | JWT grant (API) and authorization-code exchange (portal SSO) |
+| User info | `GET /oauth/userinfo` | Resolve account `base_uri`; identify SSO user |
+| List templates | `GET /accounts/{accountId}/templates` | Admin template sync (incremental by created date, or full) |
+| Template details | `GET /accounts/{accountId}/templates/{templateId}` | Refresh a single template |
+| Template recipients | `GET /accounts/{accountId}/templates/{templateId}/recipients?include_tabs=true` | Discover vote controls (checkboxes / radio groups) |
+| Envelope | `GET /accounts/{accountId}/envelopes/{envelopeId}` | Envelope metadata for a webhook event |
+| Envelope recipients | `GET /accounts/{accountId}/envelopes/{envelopeId}/recipients?include_tabs=true` | Per-voter selections used to count votes |
+| Envelope documents | `GET /accounts/{accountId}/envelopes/{envelopeId}/documents` | Template matching |
+| DocGen fields | `GET /accounts/{accountId}/envelopes/{envelopeId}/docGenFormFields` | Voting deadline and summary text |
+| Void envelope | `PUT /accounts/{accountId}/envelopes/{envelopeId}` | Close voting at the deadline or on manual close (`voidedReason`) |
 
+## Voting deadline
+
+The deadline is read from the template fields `Fecha Limite para votar`, `Hora limite votar`, `Minutos Limite para votar` and `Meridiem Limite para votar`. An in-process scheduler saves the latest vote data first (DocuSign drops tab data after a void), then voids the envelope in DocuSign to block late votes.

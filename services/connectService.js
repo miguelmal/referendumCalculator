@@ -2,8 +2,8 @@
  * connectService.js
  * Receptor de eventos de DocuSign Connect (webhooks).
  *
- * Por ahora SOLO guarda el payload crudo en storage (Redis). No parsea votos
- * ni toca la lógica de sync/scheduler; es un buzón de ingesta.
+ * Guarda el payload crudo y actualiza el sobre normalizado (conteo de votos,
+ * quórum de mayoría) en storage. Es la única fuente de actualización de sobres.
  *
  * Seguridad:
  *   DocuSign firma cada POST con HMAC-SHA256 en el header
@@ -14,9 +14,11 @@
 
 const crypto = require('crypto');
 const db = require('./databaseService');
+const ds = require('./docusignService');
 const parser = require('./docusignParser');
 const emailService = require('./emailService');
 const scheduler = require('./schedulerService');
+const config = require('../config');
 
 /**
  * Verifica la firma HMAC de un POST de Connect.
@@ -90,42 +92,89 @@ async function processConnectEnvelope(parsed, meta) {
   if (!parsed || typeof parsed !== 'object' || !meta.envelopeId) return null;
 
   const data = parsed.data || {};
-  const summary = data.envelopeSummary || parsed.envelopeSummary || data || parsed;
-  const recipients = summary.recipients || data.recipients || parsed.recipients || null;
+  let summary = data.envelopeSummary || parsed.envelopeSummary || data || parsed;
+  let recipients = summary.recipients || data.recipients || parsed.recipients || null;
+  let documents = {
+    envelopeDocuments: summary.envelopeDocuments || data.envelopeDocuments || [],
+  };
+  let docGenFormFields = summary.docGenFormFields
+    ? { docGenFormFields: summary.docGenFormFields }
+    : null;
+
+  const incomingStatus = meta.status || summary.status || 'sent';
+
+  // If the Connect webhook payload didn't embed recipient tabs (and the envelope isn't already voided),
+  // fetch the single envelope's details by envelopeId so we always have complete voting tabs.
+  if ((!recipients || !parser.hasCheckboxes(recipients)) && incomingStatus !== 'voided') {
+    try {
+      const accessToken = await ds.getAccessToken(config.docusign);
+      const { accountId, baseUri } = await ds.getAccountInfo(accessToken, config.docusign);
+      const [fetchedEnv, fetchedRecips, fetchedDocs, fetchedDocGen] = await Promise.all([
+        ds.getEnvelope(baseUri, accountId, accessToken, meta.envelopeId).catch(() => null),
+        ds.getEnvelopeRecipientsWithTabs(baseUri, accountId, accessToken, meta.envelopeId).catch(() => null),
+        ds.getEnvelopeDocuments(baseUri, accountId, accessToken, meta.envelopeId).catch(() => null),
+        ds.getDocGenFormFields(baseUri, accountId, accessToken, meta.envelopeId).catch(() => null),
+      ]);
+      if (fetchedEnv) summary = { ...summary, ...fetchedEnv };
+      if (fetchedRecips) recipients = fetchedRecips;
+      if (fetchedDocs) documents = fetchedDocs;
+      if (fetchedDocGen) docGenFormFields = fetchedDocGen;
+    } catch (fetchErr) {
+      console.warn(`⚠️  [Connect] Could not fetch details for ${meta.envelopeId}: ${fetchErr.message}`);
+    }
+  }
+
+  // Handle voided envelopes even when DocuSign strips tabs post-void
   if (!recipients || !parser.hasCheckboxes(recipients)) {
+    if (incomingStatus === 'voided') {
+      const existingEnv = await db.getEnvelope(meta.envelopeId);
+      if (existingEnv) {
+        if (existingEnv.status !== 'closed' && existingEnv.status !== 'completed') {
+          existingEnv.status = 'voided';
+          await db.saveEnvelope(meta.envelopeId, existingEnv);
+        }
+        await db.removeActivePresentacion(meta.envelopeId);
+        return existingEnv;
+      }
+    }
     return null;
   }
 
+  const storedTemplates = await db.getAllTemplates().catch(() => []);
+
   const envelopeMeta = {
     envelopeId: meta.envelopeId,
+    templateId: summary.templateId || data.templateId || null,
     emailSubject: summary.emailSubject || parsed.emailSubject || '',
-    status: meta.status || summary.status || 'sent',
+    status: incomingStatus,
     createdDateTime: summary.createdDateTime || parsed.createdDateTime || new Date().toISOString(),
     statusChangedDateTime: summary.statusChangedDateTime || new Date().toISOString(),
     expireDateTime: summary.expireDateTime || null,
     expireAfter: summary.expireAfter || null,
   };
 
-  const documents = {
-    envelopeDocuments: summary.envelopeDocuments || data.envelopeDocuments || [],
-  };
-
-  const docGenFormFields = summary.docGenFormFields
-    ? { docGenFormFields: summary.docGenFormFields }
-    : null;
-
   const normalized = parser.buildNormalizedEnvelope(
     envelopeMeta,
     recipients,
     documents,
-    docGenFormFields
+    docGenFormFields,
+    storedTemplates
   );
+
+  // Respect Admin template config: skip envelopes whose template is set to "Rastrear: No"
+  if (normalized.trackingDisabled) {
+    console.log(`⏭️  [Connect] Skipping envelope ${normalized.envelopeId} (template "${normalized.templateType}" has tracking disabled).`);
+    await db.removeActivePresentacion(normalized.envelopeId);
+    return null;
+  }
 
   // Preserve historical vote data when an envelope is voided
   if (normalized.status === 'voided') {
     const existingEnv = await db.getEnvelope(normalized.envelopeId);
     if (existingEnv) {
       Object.assign(normalized, {
+        status: existingEnv.status === 'closed' || existingEnv.status === 'completed' ? existingEnv.status : 'voided',
+        closedAt: existingEnv.closedAt || null,
         totals: existingEnv.totals,
         recipients: existingEnv.recipients,
         availableChoices: existingEnv.availableChoices,
@@ -142,7 +191,7 @@ async function processConnectEnvelope(parsed, meta) {
   // Send vote report if transitioning to 'completed'
   if (normalized.status === 'completed') {
     const existingEnv = await db.getEnvelope(normalized.envelopeId);
-    const wasCompleted = existingEnv && existingEnv.status === 'completed';
+    const wasCompleted = existingEnv && (existingEnv.status === 'completed' || existingEnv.status === 'closed');
     if (!wasCompleted) {
       console.log(`🎉 [Connect] Envelope ${normalized.envelopeId} completed — sending report...`);
       try {
@@ -155,19 +204,22 @@ async function processConnectEnvelope(parsed, meta) {
 
   await db.saveEnvelope(normalized.envelopeId, normalized);
 
-  if (
-    normalized.templateType === 'Presentacion de Casos' &&
-    (normalized.status === 'sent' || normalized.status === 'delivered') &&
-    normalized.expiresAt
-  ) {
-    await db.addActivePresentacion(normalized.envelopeId);
+  const isOpen = normalized.status === 'sent' || normalized.status === 'delivered';
+  if (isOpen) {
+    // 1. Majority Quorum Rule (floor(totalVoters / 2) + 1): close envelope immediately
     if (normalized.hasQuorum) {
-      console.log(`🗳️  [Connect] Envelope ${normalized.envelopeId} reached quorum — closing locally.`);
+      console.log(
+        `🗳️  [Connect] Envelope ${normalized.envelopeId} reached majority quorum ` +
+        `(${normalized.votedCount}/${normalized.totalVoters}, need ${normalized.quorumThreshold}). Closing envelope.`
+      );
       try {
-        await scheduler.closeEnvelope(normalized, 'quorum');
+        return await scheduler.closeEnvelope(normalized, 'quorum');
       } catch (err) {
         console.error(`Quorum close failed for ${normalized.envelopeId}:`, err.message);
       }
+    } else if (normalized.expiresAt) {
+      // 2. Track active deadline for timer expiration voiding
+      await db.addActivePresentacion(normalized.envelopeId);
     }
   } else {
     await db.removeActivePresentacion(normalized.envelopeId);

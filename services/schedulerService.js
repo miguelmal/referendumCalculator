@@ -17,8 +17,8 @@ class SchedulerService {
 
   start() {
     console.log(`⏰ Scheduler started — checking every ${TICK_MS / 1000}s for expired Presentaciones`);
-    this._tick();
-    this._timer = setInterval(() => this._tick(), TICK_MS);
+    this.tick();
+    this._timer = setInterval(() => this.tick(), TICK_MS);
   }
 
   stop() {
@@ -29,7 +29,7 @@ class SchedulerService {
     }
   }
 
-  async _tick() {
+  async tick() {
     try {
       const active = await db.getActivePresentaciones();
       const now = new Date();
@@ -69,7 +69,7 @@ class SchedulerService {
       // DocuSign drops template/tab data once an envelope is voided, so we must
       // pull the freshest vote data and persist it BEFORE issuing the void.
       // Ordering is critical: fetch → save → void. If the void fails, the
-      // latest votes are already safely in Redis.
+      // latest votes are already safely in storage.
       if (!envConfig) {
         console.error(`⚠️ No environment configuration found — cannot void ${envelope.envelopeId}. Closing locally with cached votes.`);
       } else {
@@ -146,22 +146,21 @@ class SchedulerService {
   async _captureLatestVotes(accessToken, baseUri, accountId, cached) {
     const envelopeId = cached.envelopeId;
 
-    const [envMeta, recipients, documents, docGenFormFields] = await Promise.all([
-      docusign.listEnvelopes(baseUri, accountId, accessToken, '2000-01-01T00:00:00Z', '')
-        .then(list => (list || []).find(e => e.envelopeId === envelopeId) || null)
-        .catch(() => null),
+    const [envMeta, recipients, documents, docGenFormFields, storedTemplates] = await Promise.all([
+      docusign.getEnvelope(baseUri, accountId, accessToken, envelopeId).catch(() => null),
       docusign.getEnvelopeRecipientsWithTabs(baseUri, accountId, accessToken, envelopeId),
       docusign.getEnvelopeDocuments(baseUri, accountId, accessToken, envelopeId),
       docusign.getDocGenFormFields(baseUri, accountId, accessToken, envelopeId),
+      db.getAllTemplates().catch(() => []),
     ]);
 
-    // If DocuSign no longer reports valid checkboxes (already voided / stripped),
+    // If DocuSign no longer reports valid checkboxes/radios (already voided / stripped),
     // keep the cached snapshot — do not clobber saved votes with empty data.
     if (!parser.hasCheckboxes(recipients)) {
       return null;
     }
 
-    // Minimal envelope metadata fallback when the list lookup misses.
+    // Minimal envelope metadata fallback when lookup misses.
     const envForParse = envMeta || {
       envelopeId,
       emailSubject: cached.subject,
@@ -171,7 +170,7 @@ class SchedulerService {
     };
 
     const normalized = parser.buildNormalizedEnvelope(
-      envForParse, recipients, documents, docGenFormFields
+      envForParse, recipients, documents, docGenFormFields, storedTemplates
     );
 
     // Preserve non-vote metadata from cache if DocuSign omitted it post-send.

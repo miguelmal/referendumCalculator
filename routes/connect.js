@@ -7,7 +7,7 @@ const scheduler = require('../services/schedulerService');
 // Aceptamos cualquier content-type: Connect puede mandar JSON o XML.
 const rawBody = express.raw({ type: '*/*', limit: '10mb' });
 
-// ─── Router PÚBLICO (sin Basic Auth): solo el webhook entrante ──────────────
+// ─── Router PÚBLICO (sin SSO): solo el webhook entrante ──────────────
 const webhookRouter = express.Router();
 
 /**
@@ -37,8 +37,8 @@ webhookRouter.post('/', rawBody, async (req, res) => {
       return res.status(401).json({ error: 'invalid_signature' });
     }
 
-    // Opportunistically check for any expired Presentaciones when a webhook arrives
-    scheduler._tick().catch(err => console.error('⚠️  [POST /connect] scheduler tick error:', err.message));
+    // Opportunistically check for expired envelopes when a webhook arrives
+    scheduler.tick().catch(err => console.error('⚠️  [POST /connect] scheduler tick error:', err.message));
 
     return res.status(200).json({
       received: true,
@@ -53,7 +53,7 @@ webhookRouter.post('/', rawBody, async (req, res) => {
   }
 });
 
-// ─── Router PROTEGIDO (detrás de Basic Auth): inspección/debug ──────────────
+// ─── Router PROTEGIDO (detrás de SSO): inspección/debug ──────────────
 const adminRouter = express.Router();
 
 /**

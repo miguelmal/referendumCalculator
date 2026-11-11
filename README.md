@@ -1,56 +1,100 @@
-# DocuSign Vote Counter & Form Data Aggregator
+# DocuSign Vote Counter
 
-The **DocuSign Vote Counter** is an automated Node.js application designed to streamline, track, and tally voting processes conducted through DocuSign envelopes. Originally built to handle board referendums and case presentations, the application acts as an intelligent intermediary that seamlessly pulls signed envelopes, analyzes custom form fields (like checkboxes), calculates voting results, and automatically coordinates reporting once the voting window closes.
+Node.js app that tallies board votes cast through DocuSign envelopes. DocuSign **Connect** webhooks push every envelope event to the app, which counts the votes, closes the vote when a majority is reached or the deadline passes, and emails the final report.
 
-Instead of manually reviewing DocuSign envelopes to see who voted for what, this system automatically aggregates the choices (e.g., *A Favor*, *No a Favor*, *Abstenido*) across all recipients in real time, exposing the live results to a clean, user-friendly frontend dashboard.
+## How it works
 
-## How It Works
+1. **Template config (API)** – An admin syncs templates from the DocuSign API (`/api/templates/sync`) and configures each one in the portal: display name, vote options, content field, and whether it is tracked.
+2. **Votes (Connect webhooks)** – DocuSign Connect posts envelope events to `POST /connect`. The raw event is stored, the envelope is re-read from DocuSign, and recipient checkbox/radio selections are normalized into vote totals. The app never polls for envelopes.
+3. **Majority rule** – With `n` eligible voters, the threshold is `floor(n / 2) + 1`. As soon as that many have voted, the envelope is closed (`completed`) and the report is sent.
+4. **Timer** – An in-process scheduler (`services/schedulerService.js`) checks every `SCHEDULER_TICK_MS` (default 60 s dev / 15 min prod) for envelopes past their deadline. Expired envelopes have their latest votes saved, are **voided in DocuSign**, closed locally, and the report is emailed. Deadlines come from the template's `Fecha / Hora / Minutos / Meridiem Limite para votar` fields.
 
-The system operates under the philosophy that **DocuSign is the ultimate source of truth**. 
+## Authentication
 
-1. **Synchronization**: On demand or at startup, the sync service reaches out to the DocuSign eSignature REST API via secure JWT (JSON Web Token) authentication.
-2. **Parsing & Normalization**: As envelopes are fetched, a dedicated parser examines each document. It identifies the template type (e.g., *Board Referendum* vs. *Presentacion de Casos*), extracts relevant metadata (like voting deadlines), and validates recipient checkboxes against a configured list of valid vote options.
-3. **Storage & Caching**: The normalized envelope data, recipient statuses, and calculated totals are saved in **Redis** to serve the frontend API quickly without hitting DocuSign API rate limits.
-4. **Lifecycle Management**: A background scheduler continuously monitors active votes. When a predefined expiration time is reached, the system automatically intervenes—it voids the envelope in DocuSign to prevent late voting, updates the local Redis cache, and triggers an email report with the final tally.
+| Concern | Mechanism |
+|---------|-----------|
+| Portal users (dashboard, `/api/*`, `/connect/events`) | DocuSign OAuth 2.0 **SSO** (`/auth/login` → `/auth/callback`), signed HTTP-only session cookie. Optional restriction by account (`DOCUSIGN_ACCOUNT_ID`) and email (`SSO_ALLOWED_EMAILS`) |
+| DocuSign API calls (sync, read envelope, void) | **JWT grant** signed with the integration's RSA private key/certificate. No user tokens are used |
+| DocuSign Connect → `POST /connect` | HMAC-SHA256 signature (`X-DocuSign-Signature-1`) verified with `DOCUSIGN_CONNECT_HMAC_KEY` |
 
-## Development Stack
+If SSO is not configured the portal is open (local development only; a warning is logged).
 
-The application is built on a lightweight, highly efficient technology stack tailored for rapid I/O operations and easy extensibility.
+## Architecture
 
-### Backend Core
-* **Node.js**: The core runtime environment powering the asynchronous engine of the application.
-* **Express.js**: A minimal web framework used to expose a clean RESTful API (`/api/votes`, `/api/refresh`, etc.) and serve the static frontend files.
-* **Redis**: In-memory cache (with AOF persistence in Compose) for envelopes and the active-presentaciones index.
+```
+index.js                     Express app + boot
+config.js                    Environment configuration
+routes/auth.js               Portal SSO (OAuth login/callback/logout)
+routes/connect.js            POST /connect webhook, GET /connect/events
+routes/api.js                Dashboard API
+middleware/ssoAuth.js        SSO session gate
+services/connectService.js   Connect event ingestion, vote update, majority close
+services/schedulerService.js Deadline timer, closing/voiding envelopes
+services/docusignService.js  DocuSign REST client (JWT)
+services/docusignParser.js   Envelope/template normalization and vote counting
+services/syncService.js      Template sync
+services/emailService.js     Final report emails (SMTP)
+services/databaseService.js  Data service layer (only storage interface used by the app)
+services/db/redisDriver.js     Redis driver (Upstash REST / TCP / in-memory)
+services/db/postgresDriver.js  PostgreSQL driver
+services/db/models.js          Row mappers shared by both drivers
+services/db/schema.sql         PostgreSQL schema
+public/                      Vanilla JS dashboard
+```
 
-### Third-Party Integrations
-* **DocuSign eSignature REST API**: The backbone of the document management process. The app uses the advanced JWT Grant OAuth flow for server-to-server authentication, allowing it to impersonate system users and perform actions (like fetching and voiding envelopes) seamlessly in the background.
-* **Nodemailer**: A module for Node.js applications to send emails easily. It is used to dispatch final voting tally reports to administrators once an envelope is successfully closed or expired.
+### Data layer
 
-### Frontend
-* **Vanilla Web Technologies**: The dashboard interface (located in the `public/` directory) is built using standard HTML5, CSS3, and vanilla JavaScript (`client.js`). This avoids the overhead of heavy frontend frameworks while keeping the application highly performant and easy to deploy.
+All storage goes through `services/databaseService.js`, which picks a driver from `DB_PROVIDER`:
 
-## Architecture Highlights
+- unset / `redis` (current): Upstash REST (`UPSTASH_REDIS_REST_URL` + `UPSTASH_REDIS_REST_TOKEN`, or `KV_REST_API_URL` + `KV_REST_API_TOKEN`), TCP Redis (`REDIS_URL` / `KV_URL`), or an ephemeral in-memory store when none is set.
+- `postgres`: set `DATABASE_URL` (or `POSTGRES_URL`). `schema.sql` is applied on first connect.
 
-* **Service-Oriented Structure**: The codebase is neatly divided into domain-specific services (`databaseService.js`, `docusignService.js`, `emailService.js`, etc.) residing in the `/services` directory. This modularity makes testing and swapping out logic incredibly straightforward.
-* **Dynamic Configuration**: The `config.js` file allows administrators to map checkbox labels dynamically based on the template type. This means the system can adapt to new DocuSign templates without requiring deep code refactoring. 
-* **Self-Healing State**: By treating DocuSign as the immutable source of truth, the application easily recovers from downtime. A simple cache refresh will re-align Redis with DocuSign.
-* **Data Preservation**: When DocuSign voids an envelope (e.g., due to expiration), it drops underlying template data from its API responses. The sync engine detects this state and intelligently merges the voided record with locally cached data, ensuring historical votes and metadata are never lost.
+Both drivers store the same relational rows (`templates`, `envelopes`, `connect_events`, `sync_meta`), so moving to Postgres is a configuration change.
 
-## API Usage
+## HTTP API
 
-The application exposes a RESTful API under the `/api` route to interact with the backend:
+All routes below require an SSO session.
 
-- **`GET /api/votes`**
-  Returns all envelopes currently cached in Redis, along with overall voting totals.
+| Route | Description |
+|-------|-------------|
+| `GET /api/votes` | Tracked envelopes and overall totals |
+| `POST /api/close/:envelopeId` | Close an open envelope now (voids it in DocuSign, sends report) |
+| `POST /api/report/:envelopeId` | Resend the report email |
+| `GET /api/templates` | Stored templates (valid / non-voting) and sync metadata |
+| `POST /api/templates/sync` | Sync templates from DocuSign (`?full=true` for a full sync) |
+| `POST /api/templates/:id/refresh` | Refresh one template from DocuSign |
+| `POST /api/templates/:id/config` | Save template config |
+| `GET /connect/events` | Recent stored Connect events (`?envelopeId=`, `?limit=`) |
 
-- **`POST /api/refresh`**
-  Admin trigger to re-sync the local cache with DocuSign. This fetches the latest envelope statuses and form data.
+Unauthenticated: `GET /health`, `/auth/*`, static assets, and `POST /connect` (HMAC-verified).
 
-- **`POST /api/report/:envelopeId`**
-  Manually triggers the email service to resend the final voting tally report for a specific envelope.
+## Configuration
 
-- **`POST /api/close/:envelopeId`**
-  Manual "Close Now" for *Presentacion de Casos* envelopes. Closes the envelope, prevents further voting, and sends the final report.
+| Variable | Purpose |
+|----------|---------|
+| `DOCUSIGN_INTEGRATION_KEY`, `DOCUSIGN_USER_ID`, `DOCUSIGN_ACCOUNT_ID` | JWT integration / impersonated user / account |
+| `DOCUSIGN_RSA_PRIVATE_KEY` or `DOCUSIGN_RSA_PRIVATE_KEY_PATH` | RSA private key (inline PEM, or file path; default `dev.pem`) |
+| `DOCUSIGN_AUTH_SERVER` | `account-d.docusign.com` (demo) or `account.docusign.com` (production) |
+| `DOCUSIGN_SECRET_KEY` | OAuth client secret for portal SSO |
+| `SSO_ENABLED`, `SSO_REDIRECT_URI`, `SSO_ALLOWED_EMAILS` | SSO toggle (default: on when key + secret are set), fixed redirect URI, email allowlist |
+| `SESSION_SECRET` | Session signing secret (falls back to `DOCUSIGN_SECRET_KEY`); required when SSO is on |
+| `DOCUSIGN_CONNECT_HMAC_KEY` | Connect HMAC secret (if unset, signatures are not enforced) |
+| `DB_PROVIDER`, `DATABASE_URL` / `POSTGRES_URL`, Redis variables above | Storage |
+| `SCHEDULER_TICK_MS` | Deadline check interval |
+| `SMTP_HOST`, `SMTP_PORT`, `SMTP_SECURE`, `SMTP_USER`, `SMTP_PASS`, `SMTP_FROM_NAME`, `SMTP_FROM_EMAIL` | Report emails |
+| `PORT` | HTTP port (default 3000) |
+
+Grant DocuSign JWT consent once for the impersonated user. Register `https://<host>/auth/callback` as a redirect URI on the integration key, and point the Connect configuration at `https://<host>/connect`.
+
+## Running
+
+```bash
+npm install
+npm start        # http://localhost:3000
+npm test
+```
+
+`api/index.js` and `vercel.json` are a thin serverless adapter that re-exports the Express app; the application code itself has no platform dependencies. The scheduler is an in-process timer, so it only runs where the process stays alive.
 
 ## Deployment (AWS)
 
