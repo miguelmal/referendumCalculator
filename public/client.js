@@ -145,7 +145,7 @@ async function fetchData() {
       };
     });
 
-    buildTabsUI(syncStatus);
+    buildTabsUI();
 
     document.getElementById('account-name-badge').textContent =
       `${envelopes.length} acuerdos cargados`;
@@ -157,17 +157,13 @@ async function fetchData() {
 
 // ─── Tab Logic ─────────────────────────────────────────────────────────────
 
-function buildTabsUI(syncStatus) {
+function buildTabsUI() {
   const tabNav = document.getElementById('tab-nav');
   tabNav.innerHTML = '';
   
   const tabKeys = Object.keys(tabConfig);
   if (tabKeys.length === 0) {
-    if (syncStatus && syncStatus.lastSyncError) {
-      showContainerError(`No se pudo sincronizar con DocuSign: ${syncStatus.lastSyncError}`);
-    } else {
-      renderAgreements([]);
-    }
+    renderAgreements([]);
     return;
   }
   
