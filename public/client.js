@@ -291,6 +291,44 @@ function bindSearch() {
 let adminActiveTab = 'valid'; // 'valid' | 'invalid'
 let lastAdminTemplatesPayload = null;
 
+// The config form lives in the modal section; while a template is being edited it is
+// moved into a slot right below that template's row, and moved back before re-rendering.
+function restoreAdminForm() {
+  const form = document.getElementById('template-config-form');
+  const home = document.querySelector('#admin-modal .admin-section');
+  if (form && home && form.parentNode !== home) home.appendChild(form);
+}
+
+function placeAdminFormUnderRow(templateId) {
+  const form = document.getElementById('template-config-form');
+  const container = document.getElementById('existing-templates');
+  if (!form || !container) return false;
+  const row = Array.from(container.querySelectorAll('li[data-template-row]'))
+    .find(li => li.dataset.templateRow === templateId);
+  if (!row) return false;
+
+  container.querySelectorAll('li.recipient-row.config-open').forEach(li => li.classList.remove('config-open'));
+  container.querySelectorAll('li.template-config-slot').forEach(li => li.remove());
+
+  const slot = document.createElement('li');
+  slot.className = 'template-config-slot';
+  slot.style.cssText = 'list-style:none;padding:0 12px 12px;background:var(--surface-2);border:1px solid var(--border);border-top:none;border-radius:0 0 8px 8px;';
+  row.classList.add('config-open');
+  row.after(slot);
+  slot.appendChild(form);
+  form.style.display = 'block';
+  form.style.borderTop = 'none';
+  return true;
+}
+
+function closeAdminForm() {
+  const form = document.getElementById('template-config-form');
+  if (form) form.style.display = 'none';
+  restoreAdminForm();
+  document.querySelectorAll('#existing-templates li.config-open').forEach(li => li.classList.remove('config-open'));
+  document.querySelectorAll('#existing-templates li.template-config-slot').forEach(li => li.remove());
+}
+
 function bindAdmin() {
   const btnAdmin  = document.getElementById('btn-admin');
   const btnClose  = document.getElementById('btn-close-admin');
@@ -310,9 +348,7 @@ function bindAdmin() {
   }
 
   if (btnCancel && form) {
-    btnCancel.addEventListener('click', () => {
-      form.style.display = 'none';
-    });
+    btnCancel.addEventListener('click', closeAdminForm);
   }
 
   // Close when clicking outside the modal content
@@ -350,7 +386,7 @@ function bindAdmin() {
         if (!resp.ok) throw new Error(data.error || `HTTP ${resp.status}`);
 
         showToast(`✅ Configuración guardada (${enabled ? 'Rastrear: Sí' : 'Rastrear: No'}).`, 'success');
-        form.style.display = 'none';
+        closeAdminForm();
         renderAdminTemplates(data);
       } catch (err) {
         showToast(`❌ Error al guardar: ${err.message}`, 'error');
@@ -460,13 +496,15 @@ function buildTemplateControlBadges(t) {
       `<span class="badge badge-sent" title="${escapeHtml((t.checkboxOptions || []).join(', '))}">☑️ Checkboxes (${(t.checkboxOptions || []).length})</span>`
     );
   }
-  if (t.config && t.config.updatedAt) {
-    const isTracked = t.config.enabled !== false;
-    badges.push(
-      isTracked
-        ? `<span class="badge" style="background:#dcfce7;color:#166534;border:1px solid #86efac;">🟢 Rastrear: Sí</span>`
-        : `<span class="badge" style="background:#f1f5f9;color:#475569;border:1px solid #cbd5e1;">⚪ Rastrear: No</span>`
-    );
+  if (t.isValid) {
+    const configured = Boolean(t.config && t.config.updatedAt);
+    if (configured && t.config.enabled === false) {
+      badges.push(`<span class="badge" style="background:#f1f5f9;color:#475569;border:1px solid #cbd5e1;font-weight:600;" title="Los sobres de esta plantilla se ignoran">⚪ NO se rastrea</span>`);
+    } else if (configured) {
+      badges.push(`<span class="badge" style="background:#dcfce7;color:#166534;border:1px solid #86efac;font-weight:600;" title="Configurada y activa">🟢 Se rastrea</span>`);
+    } else {
+      badges.push(`<span class="badge" style="background:#fef9c3;color:#854d0e;border:1px solid #fde047;font-weight:600;" title="Aún no configurada. Mientras tanto sus sobres se rastrean con los valores por defecto">🟡 Sin configurar (se rastrea)</span>`);
+    }
   }
   return badges.join(' ');
 }
@@ -497,15 +535,14 @@ function buildTemplateRowHtml(t, isValidSection) {
     : '';
 
   return `
-    <li class="recipient-row" style="align-items:flex-start;gap:12px;padding:10px 12px;">
+    <li class="recipient-row" data-template-row="${escapeHtml(t.templateId)}" style="align-items:flex-start;gap:12px;padding:10px 12px;">
       <div class="rec-info" style="flex:1;min-width:0;">
         <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;">
           <span class="rec-name" style="font-weight:600;">📄 ${escapeHtml(t.name)}</span>
           ${buildTemplateControlBadges(t)}
         </div>
         <div style="font-size:0.75rem;color:var(--text-muted);margin-top:2px;">
-          <span style="font-family:monospace;">ID: ${escapeHtml(t.templateId)}</span>
-          &bull; Creada: ${createdStr}
+          Creada: ${createdStr}
           ${syncedStr ? `&bull; Revisada: ${syncedStr}` : ''}
         </div>
         ${radioDetailHtml}
@@ -541,6 +578,13 @@ function renderAdminTemplates(payload) {
 
   const container = document.getElementById('existing-templates');
   if (!container) return;
+
+  // Detach the config form before the list is rebuilt so it is not destroyed
+  const formEl = document.getElementById('template-config-form');
+  const reopenId = formEl && formEl.style.display !== 'none'
+    ? document.getElementById('templateId').value
+    : null;
+  restoreAdminForm();
 
   const lastSyncStr = syncMeta.templates_last_synced_at
     ? new Date(syncMeta.templates_last_synced_at).toLocaleString('es-PR')
@@ -607,6 +651,10 @@ function renderAdminTemplates(payload) {
 
   container.innerHTML = html;
 
+  if (reopenId && !placeAdminFormUnderRow(reopenId)) {
+    formEl.style.display = 'none';
+  }
+
   // Bind Admin tabs
   container.querySelectorAll('button[data-admin-tab]').forEach(tabBtn => {
     tabBtn.addEventListener('click', () => {
@@ -644,12 +692,12 @@ function renderAdminTemplates(payload) {
 function selectTemplateInAdminForm(templateId, name, voteOptionsCsv, contentField, enabled = 'true') {
   const form = document.getElementById('template-config-form');
   if (!form) return;
-  form.style.display = 'block';
   document.getElementById('templateId').value = templateId || '';
   document.getElementById('trackTemplate').value = String(enabled) === 'false' ? 'false' : 'true';
   document.getElementById('templateName').value = name || '';
   document.getElementById('voteOptions').value = voteOptionsCsv || '';
   document.getElementById('contentField').value = contentField || 'Asuntos a Aprobar';
+  if (!placeAdminFormUnderRow(templateId)) form.style.display = 'block';
   form.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
 }
 

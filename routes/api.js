@@ -1,4 +1,5 @@
 const express = require('express');
+const config       = require('../config');
 const db           = require('../services/databaseService');
 const scheduler    = require('../services/schedulerService');
 const emailService = require('../services/emailService');
@@ -42,7 +43,9 @@ router.get('/votes', async (req, res) => {
       }
     }
 
-    const envString = process.env.NODE_ENV === 'production' ? 'PROD' : 'DEV';
+    // account-d.docusign.com is the DocuSign demo (dev) server; anything else is production.
+    const authHost = String(config.docusign.authServer || '').replace(/^https?:\/\//i, '');
+    const envString = /^account-d\./i.test(authHost) ? 'DEV' : 'PROD';
     console.log(
       `📊 [GET /api/votes] Serving ${envelopes.length} tracked envelopes (dbMode: ${db.getDiagnostics().mode})`
     );

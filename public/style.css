@@ -674,3 +674,11 @@ body {
   .row-1      { flex-direction: column; }
   .search-input { width: 100%; }
 }
+
+/* Admin: template row whose config form is open below it */
+.recipients-list li.config-open {
+  background: var(--surface-2);
+  border: 1px solid var(--border);
+  border-bottom: none;
+  border-radius: 8px 8px 0 0;
+}
