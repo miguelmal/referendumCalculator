@@ -288,7 +288,7 @@ function bindSearch() {
 
 // ─── Admin Modal & Templates ───────────────────────────────────────────────
 
-let adminActiveTab = 'valid'; // 'valid' | 'invalid'
+let adminActiveTab = 'following'; // 'following' | 'configurable' | 'invalid'
 let lastAdminTemplatesPayload = null;
 
 // The config form lives in the modal section; while a template is being edited it is
@@ -503,15 +503,15 @@ function buildTemplateControlBadges(t) {
     } else if (configured) {
       badges.push(`<span class="badge" style="background:#dcfce7;color:#166534;border:1px solid #86efac;font-weight:600;" title="Configurada y activa">🟢 Se rastrea</span>`);
     } else {
-      badges.push(`<span class="badge" style="background:#fef9c3;color:#854d0e;border:1px solid #fde047;font-weight:600;" title="Aún no configurada. Mientras tanto sus sobres se rastrean con los valores por defecto">🟡 Sin configurar (se rastrea)</span>`);
+      badges.push(`<span class="badge" style="background:#fef9c3;color:#854d0e;border:1px solid #fde047;font-weight:600;" title="Aún no configurada. Mientras tanto sus sobres se rastrean con los valores por defecto">🟡 Sin configurar</span>`);
     }
   }
   return badges.join(' ');
 }
 
 function buildTemplateRowHtml(t, isValidSection) {
-  const createdStr = t.created ? new Date(t.created).toLocaleDateString('es-PR') : 'n/a';
-  const syncedStr  = t.lastSyncedAt ? new Date(t.lastSyncedAt).toLocaleTimeString('es-PR') : '';
+  const createdStr = t.created ? new Date(t.created).toLocaleDateString('es-PR', { timeZone: 'America/Puerto_Rico' }) : 'n/a';
+  const syncedStr  = t.lastSyncedAt ? new Date(t.lastSyncedAt).toLocaleTimeString('es-PR', { timeZone: 'America/Puerto_Rico' }) : '';
   const effectiveOpts = (t.config && t.config.voteOptions && t.config.voteOptions.length)
     ? t.config.voteOptions
     : (t.voteOptions || []);
@@ -587,10 +587,10 @@ function renderAdminTemplates(payload) {
   restoreAdminForm();
 
   const lastSyncStr = syncMeta.templates_last_synced_at
-    ? new Date(syncMeta.templates_last_synced_at).toLocaleString('es-PR')
+    ? new Date(syncMeta.templates_last_synced_at).toLocaleString('es-PR', { timeZone: 'America/Puerto_Rico' })
     : 'Nunca';
   const watermarkStr = syncMeta.templates_last_created_at
-    ? new Date(syncMeta.templates_last_created_at).toLocaleDateString('es-PR')
+    ? new Date(syncMeta.templates_last_created_at).toLocaleDateString('es-PR', { timeZone: 'America/Puerto_Rico' })
     : 'Inicio';
 
   let html = `
@@ -616,37 +616,35 @@ function renderAdminTemplates(payload) {
       </div>`;
   }
 
-  // Tabs bar inside Admin modal
+  // Partition: followed = voting template configured with tracking on;
+  // configurable = voting template not configured yet or with tracking off;
+  // invalid = no radio/checkbox vote controls.
+  const isFollowed = t => Boolean(t.config && t.config.updatedAt && t.config.enabled !== false);
+  const followedTemplates = validTemplates.filter(isFollowed);
+  const configurableTemplates = validTemplates.filter(t => !isFollowed(t));
+
+  const adminTabs = [
+    { id: 'following',    label: `🟢 Siguiendo (${followedTemplates.length})`,          list: followedTemplates,     canConfigure: true,  empty: 'Aún no se sigue ninguna plantilla. Configura una en la pestaña "Configurables".' },
+    { id: 'configurable', label: `⚙ Configurables (${configurableTemplates.length})`,    list: configurableTemplates, canConfigure: true,  empty: 'No hay plantillas pendientes de configurar.' },
+    { id: 'invalid',      label: `🚫 Sin opciones de voto (${invalidTemplates.length})`, list: invalidTemplates,      canConfigure: false, empty: 'Ninguna plantilla sin opciones de voto.' },
+  ];
+  const currentAdminTab = adminTabs.find(t => t.id === adminActiveTab) || adminTabs[0];
+  adminActiveTab = currentAdminTab.id;
+
   html += `
     <div class="tab-nav" style="padding:0;margin-bottom:14px;border-bottom:1px solid var(--border);background:transparent;">
-      <button type="button" class="tab-btn ${adminActiveTab === 'valid' ? 'active' : ''}" data-admin-tab="valid">
-        ✅ Válidas para Votación (${validTemplates.length})
-      </button>
-      <button type="button" class="tab-btn ${adminActiveTab === 'invalid' ? 'active' : ''}" data-admin-tab="invalid">
-        🚫 Sin Opciones de Voto (${invalidTemplates.length})
-      </button>
+      ${adminTabs.map(t => `
+        <button type="button" class="tab-btn ${t.id === adminActiveTab ? 'active' : ''}" data-admin-tab="${t.id}">${t.label}</button>`).join('')}
     </div>`;
 
-  if (adminActiveTab === 'valid') {
-    if (validTemplates.length === 0) {
-      html += `<p style="color:var(--text-muted);font-size:0.85rem;margin-bottom:16px;">No hay plantillas con Radio Buttons ni Checkboxes almacenadas.</p>`;
-    } else {
-      html += `<ul class="recipients-list" style="margin-bottom:12px;">`;
-      for (const t of validTemplates) {
-        html += buildTemplateRowHtml(t, true);
-      }
-      html += `</ul>`;
-    }
+  if (currentAdminTab.list.length === 0) {
+    html += `<p style="color:var(--text-muted);font-size:0.85rem;margin-bottom:16px;">${currentAdminTab.empty}</p>`;
   } else {
-    if (invalidTemplates.length === 0) {
-      html += `<p style="color:var(--text-muted);font-size:0.85rem;margin-bottom:16px;">Ninguna plantilla sin opciones de voto.</p>`;
-    } else {
-      html += `<ul class="recipients-list" style="margin-bottom:12px;">`;
-      for (const t of invalidTemplates) {
-        html += buildTemplateRowHtml(t, false);
-      }
-      html += `</ul>`;
+    html += `<ul class="recipients-list" style="margin-bottom:12px;">`;
+    for (const t of currentAdminTab.list) {
+      html += buildTemplateRowHtml(t, currentAdminTab.canConfigure);
     }
+    html += `</ul>`;
   }
 
   container.innerHTML = html;
@@ -659,6 +657,7 @@ function renderAdminTemplates(payload) {
   container.querySelectorAll('button[data-admin-tab]').forEach(tabBtn => {
     tabBtn.addEventListener('click', () => {
       adminActiveTab = tabBtn.dataset.adminTab;
+      closeAdminForm();
       renderAdminTemplates();
     });
   });
@@ -779,7 +778,7 @@ function buildCard(env) {
   let expiresHtml = '';
   if (env.templateType === 'Presentacion de Casos') {
     if (env.closedAt) {
-      const closedStr = new Date(env.closedAt).toLocaleString('es-PR');
+      const closedStr = new Date(env.closedAt).toLocaleString('es-PR', { timeZone: 'America/Puerto_Rico' });
       expiresHtml = `<span class="hora-final" title="Cerrado el ${closedStr}">🔒 Cerrado: ${closedStr}</span>`;
     } else if (env.horaFinalVoto) {
       // Show the configured deadline + a live countdown if expiresAt is valid
@@ -805,14 +804,14 @@ function buildCard(env) {
           countdownHtml = ` <span class="${chipClass}">${label}</span>`;
         }
       }
-      expiresHtml = `<span class="hora-final">⏰ ${escapeHtml(env.horaFinalVoto)}</span>${countdownHtml}`;
+      expiresHtml = `<span class="hora-final">⏰ ${escapeHtml(env.horaFinalVoto)} (hora de PR)</span>${countdownHtml}`;
     } else {
       expiresHtml = `<span class="hora-final missing">⏰ Sin hora límite</span>`;
     }
   }
 
   const modDate = env.lastModified
-    ? new Date(env.lastModified).toLocaleDateString('es-PR')
+    ? new Date(env.lastModified).toLocaleDateString('es-PR', { timeZone: 'America/Puerto_Rico' })
     : '';
 
   // Action buttons
@@ -915,7 +914,7 @@ function buildRecipientRows(recipients, config) {
     }
 
     const signedDateHtml = r.signedDateTime 
-      ? `<span class="rec-role">📅 ${new Date(r.signedDateTime).toLocaleString('es-PR')}</span>`
+      ? `<span class="rec-role">📅 ${new Date(r.signedDateTime).toLocaleString('es-PR', { timeZone: 'America/Puerto_Rico' })}</span>`
       : '';
     const emailHtml = r.email 
       ? `<span class="rec-role" style="text-transform:lowercase;">✉️ ${escapeHtml(r.email)}</span>` 

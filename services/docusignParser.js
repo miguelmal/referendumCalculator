@@ -162,7 +162,7 @@ function findDocGenValue(docGenMap, label) {
  * Builds a human-readable "hora final de voto" string from docGen fields.
  * Returns null when any field is missing.
  *
- * Example output: "08/14/2026 5:00 PM"
+ * Example output: "08/14/2026 5:00 PM" (Puerto Rico time)
  *
  * @param {Object<string, string>} docGenMap - From parseDocGenFields().
  * @returns {string|null}
@@ -182,6 +182,43 @@ function parseHoraFinalVoto(docGenMap) {
   return null;
 }
 
+// ─── Puerto Rico time ──────────────────────────────────────────────────────
+
+// Voting deadlines are entered in Puerto Rico time (America/Puerto_Rico = AST, UTC-4).
+// Puerto Rico does not observe daylight saving time, so the offset is constant all year.
+const PR_UTC_OFFSET_HOURS = 4; // PR wall-clock + 4h = UTC
+
+/**
+ * Converts a Puerto Rico wall-clock deadline string ("MM/DD/YYYY H:MM AM|PM", as built by
+ * parseHoraFinalVoto) into a UTC Date, independent of the server's timezone.
+ * Returns null if the string cannot be parsed.
+ * @param {string} horaFinal
+ * @returns {Date|null}
+ */
+function parsePuertoRicoDateTime(horaFinal) {
+  const m = String(horaFinal || '').trim().match(
+    /^(\d{1,4})[\/-](\d{1,2})[\/-](\d{1,4})\s+(\d{1,2}):(\d{2})\s*([AP])\.?M\.?$/i
+  );
+  if (!m) return null;
+
+  let year, month, day;
+  if (m[1].length === 4) {
+    // YYYY-MM-DD
+    year = +m[1]; month = +m[2]; day = +m[3];
+  } else {
+    // MM/DD/YYYY (US order, as DocuSign date fields are emitted)
+    month = +m[1]; day = +m[2]; year = +m[3];
+  }
+  let hour = +m[4];
+  const minute = +m[5];
+  const isPm = m[6].toUpperCase() === 'P';
+  if (hour < 1 || hour > 12 || minute > 59 || month < 1 || month > 12 || day < 1 || day > 31) return null;
+  hour = (hour % 12) + (isPm ? 12 : 0);
+
+  const utc = new Date(Date.UTC(year, month - 1, day, hour + PR_UTC_OFFSET_HOURS, minute));
+  return isNaN(utc.getTime()) ? null : utc;
+}
+
 /**
  * Parses the expiration datetime for a Presentacion de Casos envelope.
  *
@@ -198,12 +235,8 @@ function parseExpiresAt(docGenMap, envelope) {
   // 1. DocGen template fields
   const horaFinal = parseHoraFinalVoto(docGenMap);
   if (horaFinal) {
-    try {
-      const parsed = new Date(horaFinal);
-      if (!isNaN(parsed.getTime())) {
-        return parsed.toISOString();
-      }
-    } catch (e) { /* fall through */ }
+    const parsed = parsePuertoRicoDateTime(horaFinal);
+    if (parsed) return parsed.toISOString();
   }
 
   // 2. DocuSign API expireDateTime
@@ -545,6 +578,7 @@ module.exports = {
   parseDocGenFields,
   findDocGenValue,
   parseHoraFinalVoto,
+  parsePuertoRicoDateTime,
   parseExpiresAt,
   parseContentText,
   getStandardChoice,
