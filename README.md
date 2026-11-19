@@ -9,6 +9,10 @@ Node.js app that tallies board votes cast through DocuSign envelopes. DocuSign *
 3. **Majority rule** – With `n` eligible voters, the threshold is `floor(n / 2) + 1`. As soon as that many have voted, the envelope is closed (`completed`) and the report is sent.
 4. **Timer** – An in-process scheduler (`services/schedulerService.js`) checks every `SCHEDULER_TICK_MS` (default 60 s dev / 15 min prod) for envelopes past their deadline. Expired envelopes have their latest votes saved, are **voided in DocuSign**, closed locally, and the report is emailed. Deadlines come from the template's `Fecha / Hora / Minutos / Meridiem Limite para votar` fields.
 
+## Events viewer
+
+The **Eventos** button in the dashboard header opens a modal that lists the stored Connect events (time, event name, status, envelope ID, HMAC verification result). Click an event to see its raw payload, pretty-printed when it is JSON. You can filter by envelope ID (Enter to apply), choose how many events to load (25–500), and reload. It reads `GET /connect/events`, so it needs the same SSO session as the rest of the portal.
+
 ## Authentication
 
 | Concern | Mechanism |
@@ -39,7 +43,7 @@ services/db/redisDriver.js     Redis driver (Upstash REST / TCP / in-memory)
 services/db/postgresDriver.js  PostgreSQL driver
 services/db/models.js          Row mappers shared by both drivers
 services/db/schema.sql         PostgreSQL schema
-public/                      Vanilla JS dashboard
+public/                      Vanilla JS dashboard (votes, admin, Connect events viewer)
 ```
 
 ### Data layer
@@ -64,7 +68,7 @@ All routes below require an SSO session.
 | `POST /api/templates/sync` | Sync templates from DocuSign (`?full=true` for a full sync) |
 | `POST /api/templates/:id/refresh` | Refresh one template from DocuSign |
 | `POST /api/templates/:id/config` | Save template config |
-| `GET /connect/events` | Recent stored Connect events (`?envelopeId=`, `?limit=`) |
+| `GET /connect/events` | Recent stored Connect events (`?envelopeId=`, `?limit=`, max 500). Used by the dashboard's **Eventos** viewer |
 
 Unauthenticated: `GET /health`, `/auth/*`, static assets, and `POST /connect` (HMAC-verified).
 

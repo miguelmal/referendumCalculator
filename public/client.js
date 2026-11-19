@@ -14,6 +14,7 @@ document.addEventListener('DOMContentLoaded', async () => {
   bindRefresh();
   bindSearch();
   bindAdmin();
+  bindEventsViewer();
 
   const isAuth = await checkAuthStatus();
   if (isAuth) {
@@ -1030,3 +1031,73 @@ function escapeHtml(str) {
 
 
 
+
+
+// ─── Connect events viewer ──────────────────────────────────────────────────
+
+function bindEventsViewer() {
+  const modal = document.getElementById('events-modal');
+  const btnOpen = document.getElementById('btn-events');
+  if (!modal || !btnOpen) return;
+
+  btnOpen.addEventListener('click', () => {
+    modal.showModal();
+    loadConnectEvents();
+  });
+  document.getElementById('btn-close-events').addEventListener('click', () => modal.close());
+  modal.addEventListener('click', (e) => { if (e.target === modal) modal.close(); });
+  document.getElementById('btn-events-reload').addEventListener('click', loadConnectEvents);
+  document.getElementById('events-limit').addEventListener('change', loadConnectEvents);
+  document.getElementById('events-envelope-filter').addEventListener('keydown', (e) => {
+    if (e.key === 'Enter') loadConnectEvents();
+  });
+}
+
+async function loadConnectEvents() {
+  const list = document.getElementById('events-list');
+  const envelopeId = document.getElementById('events-envelope-filter').value.trim();
+  const limit = document.getElementById('events-limit').value;
+  list.innerHTML = '<div class="loading-state"><div class="spinner"></div>Cargando eventos…</div>';
+
+  try {
+    const params = new URLSearchParams({ limit });
+    if (envelopeId) params.set('envelopeId', envelopeId);
+    const resp = await fetch(`/connect/events?${params}`, { cache: 'no-store' });
+    const data = await resp.json();
+    if (!resp.ok) throw new Error(data.error || `HTTP ${resp.status}`);
+    renderConnectEvents(data.events || []);
+  } catch (err) {
+    list.innerHTML = `<p class="events-empty">Error: ${escapeHtml(err.message)}</p>`;
+  }
+}
+
+function prettyEventPayload(raw) {
+  try {
+    return JSON.stringify(JSON.parse(raw), null, 2);
+  } catch {
+    return raw || '';
+  }
+}
+
+function renderConnectEvents(events) {
+  const list = document.getElementById('events-list');
+  if (!events.length) {
+    list.innerHTML = '<p class="events-empty">No hay eventos.</p>';
+    return;
+  }
+  list.innerHTML = events.map((ev) => {
+    const when = ev.receivedAt ? new Date(ev.receivedAt).toLocaleString() : '';
+    const sig = ev.signatureVerified ? '✔ firma' : '✖ sin firma';
+    return `
+      <details class="event-item">
+        <summary>
+          <span class="event-time">${escapeHtml(when)}</span>
+          <span class="event-name">${escapeHtml(ev.event || 'n/a')}</span>
+          <span class="event-status">${escapeHtml(ev.status || '')}</span>
+          <span class="event-env">${escapeHtml(ev.envelopeId || '')}</span>
+          <span class="event-sig ${ev.signatureVerified ? 'ok' : 'bad'}">${sig}</span>
+        </summary>
+        <pre class="event-json">${escapeHtml(prettyEventPayload(ev.raw))}</pre>
+      </details>`;
+  }).join('');
+}

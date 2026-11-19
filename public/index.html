@@ -22,6 +22,9 @@
     </div>
     <div class="header-right">
       <span id="user-badge" style="display:none;font-size:0.82rem;color:#cbd5e1;margin-right:6px;"></span>
+      <button class="btn" id="btn-events" title="Visor de eventos Connect">
+        <span class="btn-icon">☰</span> Eventos
+      </button>
       <button class="btn" id="btn-admin" title="Configuraciones">
         <span class="btn-icon">⚙️</span> Admin
       </button>
@@ -120,6 +123,29 @@
             </div>
           </form>
         </section>
+      </div>
+    </div>
+  </dialog>
+
+  <!-- Events Modal -->
+  <dialog id="events-modal" class="admin-modal events-modal">
+    <div class="modal-content">
+      <header class="modal-header">
+        <h2>Visor de Eventos Connect</h2>
+        <button id="btn-close-events" class="modal-close-icon" aria-label="Cerrar">&times;</button>
+      </header>
+      <div class="modal-body">
+        <div class="events-toolbar">
+          <input type="text" id="events-envelope-filter" class="search-input" placeholder="Filtrar por Envelope ID…" aria-label="Filtrar por Envelope ID">
+          <select id="events-limit" class="search-input" aria-label="Cantidad" style="cursor:pointer;">
+            <option value="25">25</option>
+            <option value="50" selected>50</option>
+            <option value="100">100</option>
+            <option value="500">500</option>
+          </select>
+          <button class="btn btn-refresh" id="btn-events-reload">↻ Recargar</button>
+        </div>
+        <div id="events-list"></div>
       </div>
     </div>
   </dialog>

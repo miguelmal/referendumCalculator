@@ -682,3 +682,17 @@ body {
   border-bottom: none;
   border-radius: 8px 8px 0 0;
 }
+
+/* ─── Events viewer ──────────────────────────────────────────────────────── */
+.events-modal { max-width: 1000px; }
+.events-toolbar { display: flex; gap: 10px; margin-bottom: 16px; }
+.events-toolbar input { flex: 1; }
+.events-empty { color: var(--text-muted, #64748b); text-align: center; padding: 24px; }
+.event-item { border: 1px solid var(--border); border-radius: 8px; margin-bottom: 8px; background: var(--surface); }
+.event-item summary { display: flex; gap: 12px; align-items: center; padding: 10px 14px; cursor: pointer; font-size: 0.85rem; flex-wrap: wrap; }
+.event-time { color: #64748b; }
+.event-name { font-weight: 600; }
+.event-env { font-family: monospace; font-size: 0.78rem; color: #64748b; margin-left: auto; }
+.event-sig.ok { color: #065f46; }
+.event-sig.bad { color: #b91c1c; }
+.event-json { margin: 0; padding: 12px 14px; max-height: 360px; overflow: auto; background: #0f172a; color: #e2e8f0; font-size: 0.78rem; border-radius: 0 0 8px 8px; }
